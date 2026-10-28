@@ -1,19 +1,15 @@
 // lib/pdfText.ts
 // Step 1: PDF to lines
-// Uses the legacy build of pdfjs-dist for Node.js server environment
+// pdfjs-dist ka legacy build, Node.js / Vercel serverless ke liye.
 
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-ignore - pdfjs-dist legacy mjs export typings
+// @ts-ignore - pdfjs-dist legacy .mjs ke types nahi milte
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-ignore - in-memory worker binding for serverless environments (Vercel / AWS Lambda)
+// @ts-ignore - worker ko memory mein bind karna hai (Vercel pe file path se load nahi hota)
 import * as pdfjsWorker from "pdfjs-dist/legacy/build/pdf.worker.mjs";
 
-// Ensure pdfjs uses the in-memory worker instead of attempting dynamic relative filesystem imports on Vercel
-if (typeof globalThis !== "undefined" && !("pdfjsWorker" in globalThis)) {
-  // @ts-ignore
-  globalThis.pdfjsWorker = pdfjsWorker;
-}
+// pdfjs "fake worker" mode mein globalThis.pdfjsWorker.WorkerMessageHandler dhundta hai.
+// Hamesha set karo, taaki ./pdf.worker.mjs ko filesystem se import na karna pade.
+(globalThis as { pdfjsWorker?: unknown }).pdfjsWorker = pdfjsWorker;
 
 export const PAGE = "<<PAGE>>";
 
@@ -24,11 +20,11 @@ interface TextItemLike {
 
 function isTextItem(item: unknown): item is TextItemLike {
   if (typeof item !== "object" || item === null) return false;
-  const candidate = item as { str?: unknown; transform?: unknown };
+  const c = item as { str?: unknown; transform?: unknown };
   return (
-    typeof candidate.str === "string" &&
-    Array.isArray(candidate.transform) &&
-    candidate.transform.length >= 6
+    typeof c.str === "string" &&
+    Array.isArray(c.transform) &&
+    c.transform.length >= 6
   );
 }
 
@@ -37,16 +33,14 @@ interface TextRow {
   items: Array<{ str: string; x: number }>;
 }
 
+const Y_TOLERANCE = 3.5;
+
 /**
- * Extracts all lines of text from an in-memory PDF buffer, preserving reading order.
- * - Adds a PAGE ("<<PAGE>>") delimiter before each page's extracted lines.
- * - Groups text items into rows by their y-coordinate within a ~4 unit tolerance.
- * - Sorts rows top to bottom (y descending).
- * - Sorts items inside each row left to right (x ascending).
- * - Collapses repeated whitespace and trims lines.
- *
- * If the PDF needs a password and it is missing or incorrect, pdfjs throws
- * an error with name "PasswordException", which is allowed to propagate.
+ * In-memory PDF buffer se lines nikalta hai (reading order mein).
+ * - Har page ke pehle PAGE marker push hota hai.
+ * - Items ko y se rows mein group karta hai, rows top to bottom, items left to right.
+ * - Password galat ya missing ho to pdfjs "PasswordException" throw karta hai,
+ *   jo caller (API route) tak propagate hone dena hai.
  */
 export async function pdfToLines(
   buf: Buffer,
@@ -62,71 +56,50 @@ export async function pdfToLines(
   const doc = await loadingTask.promise;
   const allLines: string[] = [];
 
-  for (let pageNum = 1; pageNum <= doc.numPages; pageNum++) {
-    // Add page marker before every page's extracted lines
-    allLines.push(PAGE);
+  try {
+    for (let pageNum = 1; pageNum <= doc.numPages; pageNum++) {
+      allLines.push(PAGE);
 
-    const page = await doc.getPage(pageNum);
-    const content = await page.getTextContent();
+      const page = await doc.getPage(pageNum);
+      const content = await page.getTextContent();
 
-    const items: Array<{ str: string; x: number; y: number }> = [];
+      const rows: TextRow[] = [];
 
-    for (const rawItem of content.items) {
-      if (!isTextItem(rawItem)) continue;
-      // Skip empty items
-      if (!rawItem.str || rawItem.str.trim() === "") continue;
+      for (const raw of content.items) {
+        if (!isTextItem(raw)) continue;
+        if (!raw.str || raw.str.trim() === "") continue;
 
-      items.push({
-        str: rawItem.str,
-        x: rawItem.transform[4],
-        y: rawItem.transform[5],
-      });
-    }
+        const x = raw.transform[4];
+        const y = raw.transform[5];
 
-    // Group text items into rows by their y coordinate, using a 4 unit tolerance bucket
-    const rows: TextRow[] = [];
-    const Y_TOLERANCE = 4.0;
+        let target: TextRow | null = null;
+        let best = Infinity;
+        for (const row of rows) {
+          const diff = Math.abs(row.y - y);
+          if (diff <= Y_TOLERANCE && diff < best) {
+            best = diff;
+            target = row;
+          }
+        }
 
-    for (const item of items) {
-      let matchedRow: TextRow | null = null;
-      let minDiff = Infinity;
+        if (target) target.items.push({ str: raw.str, x });
+        else rows.push({ y, items: [{ str: raw.str, x }] });
+      }
+
+      rows.sort((a, b) => b.y - a.y);
 
       for (const row of rows) {
-        const diff = Math.abs(row.y - item.y);
-        if (diff <= Y_TOLERANCE && diff < minDiff) {
-          minDiff = diff;
-          matchedRow = row;
-        }
-      }
-
-      if (matchedRow) {
-        matchedRow.items.push({ str: item.str, x: item.x });
-      } else {
-        rows.push({
-          y: item.y,
-          items: [{ str: item.str, x: item.x }],
-        });
+        row.items.sort((a, b) => a.x - b.x);
+        const line = row.items
+          .map((it) => it.str)
+          .join(" ")
+          .replace(/\s+/g, " ")
+          .trim();
+        if (line) allLines.push(line);
       }
     }
-
-    // Sort rows top to bottom (y descending)
-    rows.sort((a, b) => b.y - a.y);
-
-    // Sort items inside each row left to right (x ascending, transform[4])
-    for (const row of rows) {
-      row.items.sort((a, b) => a.x - b.x);
-
-      // Join items with a space, collapse repeated whitespace, trim.
-      const line = row.items
-        .map((it) => it.str)
-        .join(" ")
-        .replace(/\s+/g, " ")
-        .trim();
-
-      if (line.length > 0) {
-        allLines.push(line);
-      }
-    }
+  } finally {
+    await doc.destroy();
   }
 
   return allLines;

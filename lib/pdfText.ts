@@ -5,6 +5,15 @@
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore - pdfjs-dist legacy mjs export typings
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore - in-memory worker binding for serverless environments (Vercel / AWS Lambda)
+import * as pdfjsWorker from "pdfjs-dist/legacy/build/pdf.worker.mjs";
+
+// Ensure pdfjs uses the in-memory worker instead of attempting dynamic relative filesystem imports on Vercel
+if (typeof globalThis !== "undefined" && !("pdfjsWorker" in globalThis)) {
+  // @ts-ignore
+  globalThis.pdfjsWorker = pdfjsWorker;
+}
 
 export const PAGE = "<<PAGE>>";
 

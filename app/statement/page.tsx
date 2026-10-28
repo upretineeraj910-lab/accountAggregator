@@ -207,6 +207,13 @@ export default function StatementPage() {
       return;
     }
 
+    if (selectedFile.size > 4.5 * 1024 * 1024) {
+      setErrorMsg(
+        "File size exceeds 4.5 MB (hosting limit). Please upload a statement under 4.5 MB."
+      );
+      return;
+    }
+
     setLoading(true);
     setErrorMsg(null);
 

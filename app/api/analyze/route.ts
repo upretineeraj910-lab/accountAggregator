@@ -8,8 +8,9 @@ import { analyze, marketActivity } from "@/lib/analyze";
 import { generateAiAssessment, type AiSummary } from "@/lib/ai";
 
 export const runtime = "nodejs";
+export const maxDuration = 60; // 60 seconds execution time on Vercel
 
-const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
+const MAX_FILE_SIZE_BYTES = 4.5 * 1024 * 1024; // 4.5 MB (Vercel Serverless payload limit)
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   try {

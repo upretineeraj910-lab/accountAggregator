@@ -158,11 +158,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       );
     }
 
+    console.error("[POST /api/analyze Error]:", err);
+
     // Generic error response - do not leak stack traces or internal logs
     return NextResponse.json(
       {
         error:
-          "An error occurred while processing the statement. Please try again.",
+          process.env.NODE_ENV !== "production" && err instanceof Error
+            ? `Statement error: ${err.message}`
+            : "An error occurred while processing the statement. Please try again.",
       },
       { status: 500 }
     );

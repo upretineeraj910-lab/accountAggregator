@@ -49,7 +49,8 @@ export function extractAccountInfo(
   txns?: Txn[],
   userHolderName?: string
 ): AccountInfo {
-  const headerLines = (lines || []).slice(0, 60);
+  try {
+    const headerLines = (lines || []).slice(0, 60);
 
   // 1. Bank Name
   let bankName: string | undefined;
@@ -207,7 +208,7 @@ export function extractAccountInfo(
       Math.round((firstTx.balance - firstTx.credit + firstTx.debit) * 100) / 100;
   }
 
-  return {
+    return {
     holderName,
     accountNumber,
     bankName,
@@ -217,5 +218,11 @@ export function extractAccountInfo(
     statementPeriod,
     openingBalance,
     closingBalance,
-  };
+    };
+  } catch (err) {
+    console.error("[extractAccountInfo Error]:", err);
+    return {
+      holderName: userHolderName,
+    };
+  }
 }

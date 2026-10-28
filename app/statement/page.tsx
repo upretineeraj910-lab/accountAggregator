@@ -225,7 +225,15 @@ export default function StatementPage() {
         body: formData,
       });
 
-      const data: ApiResponse = await res.json();
+      let data: ApiResponse;
+      try {
+        data = await res.json();
+      } catch {
+        setErrorMsg(
+          `Server returned error (${res.status}). Please check your server terminal console for details.`
+        );
+        return;
+      }
 
       if (!res.ok) {
         if (res.status === 401 && data.needPassword) {

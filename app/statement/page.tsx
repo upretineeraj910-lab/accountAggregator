@@ -83,6 +83,7 @@ interface AnalysisResult {
   };
   lendingApps: { count: number; total: number };
   creditCardPayments: number;
+  insurancePayments: number;
   emiCapacity: number | null;
   salary: SalaryResult;
   otherCredits: OtherCreditsSummary;
@@ -1347,6 +1348,16 @@ export default function StatementPage() {
                 </div>
                 <span className={styles.metricSubtext}>
                   Credits &ge; 2x monthly salary
+                </span>
+              </div>
+
+              <div className={styles.marketSubCard}>
+                <div className={styles.marketSubLabel}>Insurance Premium</div>
+                <div className={styles.marketSubValue}>
+                  {formatInr(analysisData.insurancePayments || 0)}
+                </div>
+                <span className={styles.metricSubtext}>
+                  LIC / health &amp; life policies (non-EMI)
                 </span>
               </div>
 

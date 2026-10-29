@@ -2,11 +2,19 @@
 // Unit tests for parsing, Axis multi-line fix, and strict loan scoring rules
 
 import assert from "node:assert";
-import { parseTxns, type Txn } from "../parse.ts";
+import { parseTxns, parseStatement, parseStatementWithDebug, type Txn } from "../parse.ts";
+import type { Row } from "../pdfText.ts";
 import { analyze } from "../analyze.ts";
 import { calcEmi, maxLoanForEmi, checkNewLoan } from "../loanCheck.ts";
 import { detectSalary, type SalaryCredit } from "../salary.ts";
-import { summarizeOtherCredits } from "../otherCredits.ts";
+import { summarizeOtherCredits, isSelfTransfer } from "../otherCredits.ts";
+import {
+  isObligationDebit,
+  BOUNCE_RE,
+  CASH_DEPOSIT_RE,
+  INSURANCE_RE,
+  WALLET_RE,
+} from "../keywords.ts";
 import { extractAccountInfo } from "../accountInfo.ts";
 import { generateAiAssessment } from "../ai.ts";
 
@@ -735,6 +743,201 @@ const aiResultWithoutKey = await generateAiAssessment({
 });
 assert.strictEqual(aiResultWithoutKey.enabled, false);
 
+// ==========================================
+// Tests for PNB ONE Profile, 1-Decimal Amounts, Remarks Centering, Legend Filtering, and Keyword Rules
+// ==========================================
+
+// --- PNB Test 1, 2, 3: Row-based fixture with 1-decimal amounts, remarks above anchor, and legend filtering ---
+const fakePnbRows: Row[] = [
+  // Header page 1
+  { text: "PUNJAB NATIONAL BANK", y: 820, page: 1 },
+  { text: "Statement of Account - Generated through PNB ONE", y: 805, page: 1 },
+  { text: "Date | Instrument ID | Amount(INR) | Type | Balance | Remarks", y: 780, page: 1 },
+
+  // Transaction A (Newer: 22/10/2026): 1-decimal amount 700.0 DR 1654.93
+  // Remarks first line is ABOVE numbers row (y=745), numbers anchor row (y=735), remarks line below (y=725)
+  { text: "UPI/DR/165240394537/Axis", y: 745, page: 1 },
+  { text: "22/10/2026 700.0 DR 1654.93 Ban/UTIB/billpay.axb@upi/", y: 735, page: 1 },
+  { text: "Electricity payment", y: 725, page: 1 },
+
+  // Transaction B (Older: 20/10/2026): 1-decimal amount 9.7 DR
+  // Narration above (y=675), anchor (y=665)
+  { text: "Consolidated SMS charges for Q2", y: 675, page: 1 },
+  { text: "20/10/2026 9.7 DR 2354.93 SMS Charges", y: 665, page: 1 },
+
+  // Page 1 footer
+  { text: "Date: 22/10/2026 17:47:62 Page 1", y: 40, page: 1 },
+
+  // Page 2 header
+  { text: "Date | Instrument ID | Amount(INR) | Type | Balance | Remarks", y: 800, page: 2 },
+
+  // Transaction C (Oldest: 18/10/2026): 0.0 or normal amount on last page
+  { text: "Interest credit for savings", y: 755, page: 2 },
+  { text: "18/10/2026 50.0 CR 2364.63 CR INT", y: 745, page: 2 },
+
+  // Last page footer & Legend
+  { text: "Date: 22/10/2026 17:47:62 Page 2", y: 60, page: 2 },
+  { text: "***Generated through PNB ONE***", y: 45, page: 2 },
+  { text: "● Abbreviations / Legend: DR: Debit, CR: Credit, Entries in loan accounts", y: 30, page: 2 },
+  { text: "loan accounts summary and recovery details", y: 15, page: 2 },
+];
+
+const pnbDebugResult = parseStatementWithDebug(fakePnbRows);
+assert.strictEqual(pnbDebugResult.profile, "pnb", "Statement format must be detected as 'pnb'");
+assert.strictEqual(pnbDebugResult.anchorsCount, 3, "Expected 3 anchors detected");
+assert.strictEqual(pnbDebugResult.txns.length, 3, "Expected 3 transactions parsed");
+
+// Sort check: date ascending (chronological order)
+const [oldestTxn, middleTxn, newestTxn] = pnbDebugResult.txns;
+
+// 1. Check 1-decimal amounts parsed properly
+// Transaction B (20/10/2026): 9.7 debit, balance 2354.93
+assert.strictEqual(middleTxn.debit, 9.7, "Expected 9.7 debit parsed correctly for 1-decimal amount");
+assert.strictEqual(middleTxn.credit, 0);
+assert.strictEqual(middleTxn.balance, 2354.93, "Expected balance 2354.93");
+
+// Transaction A (22/10/2026): 700.0 debit, balance 1654.93
+assert.strictEqual(newestTxn.debit, 700.0, "Expected 700.0 debit parsed correctly for 1-decimal amount");
+assert.strictEqual(newestTxn.credit, 0);
+assert.strictEqual(newestTxn.balance, 1654.93, "Expected balance 1654.93");
+
+// Oldest txn (18/10/2026): 50.0 credit
+assert.strictEqual(oldestTxn.credit, 50.0, "Oldest row on last page must be included");
+assert.strictEqual(oldestTxn.balance, 2364.63);
+
+// 2. Remarks ordering: remarks line above anchor (y=745) + anchor inline remarks (y=735) + remarks below (y=725)
+// Sorted by y descending: line above -> anchor inline -> line below
+assert.strictEqual(
+  newestTxn.narration,
+  "UPI/DR/165240394537/Axis Ban/UTIB/billpay.axb@upi/ Electricity payment",
+  `Remarks above anchor must precede anchor remarks. Got: ${newestTxn.narration}`
+);
+
+// 3. Legend lines ("loan accounts", "***Generated through PNB ONE***", bullet "●") must be suppressed
+for (const t of pnbDebugResult.txns) {
+  assert.ok(
+    !t.narration.toLowerCase().includes("loan accounts"),
+    `Narration must not contain legend text 'loan accounts', found in: ${t.narration}`
+  );
+  assert.ok(
+    !t.narration.includes("***Generated"),
+    `Narration must not contain '***Generated', found in: ${t.narration}`
+  );
+  assert.ok(
+    !t.narration.includes("●"),
+    `Narration must not contain bullet '●', found in: ${t.narration}`
+  );
+}
+
+// --- Test 4: 3 months of "NEFT_IN ... TREASURY" 42080 credit: salary detect ho (method "keyword") ---
+const treasuryTxns: Txn[] = [
+  {
+    date: new Date(2026, 6, 31),
+    narration: "NEFT_IN:BARASAT - I TREASURY, WE/WBP12345/SAL",
+    credit: 42080,
+    debit: 0,
+    balance: 50000,
+  },
+  {
+    date: new Date(2026, 7, 31),
+    narration: "NEFT_IN:BARASAT - I TREASURY, WE/WBP12346",
+    credit: 42080,
+    debit: 0,
+    balance: 60000,
+  },
+  {
+    date: new Date(2026, 8, 30),
+    narration: "NEFT_IN:BARASAT - I TREASURY, WE/WBP12347",
+    credit: 42080,
+    debit: 0,
+    balance: 70000,
+  },
+  // Arrears credit outside median +/- 40% (75000 vs 42080 median)
+  {
+    date: new Date(2026, 8, 10),
+    narration: "NEFT_IN:BARASAT - I TREASURY, WE/ARREARS",
+    credit: 75000,
+    debit: 0,
+    balance: 145000,
+  },
+];
+
+const treasurySalary = detectSalary(treasuryTxns);
+assert.strictEqual(treasurySalary.method, "keyword", "Method must be keyword due to TREASURY keyword");
+assert.strictEqual(treasurySalary.months, 3, "Expected 3 months of regular salary");
+assert.strictEqual(treasurySalary.avgSalary, 42080, "Expected avgSalary 42080");
+assert.ok(treasurySalary.extraCredits && treasurySalary.extraCredits.length === 1, "Expected 1 extra credit outside +/- 40%");
+assert.strictEqual(treasurySalary.extraCredits![0].amount, 75000, "Arrears credit of 75000 must be in extraCredits");
+
+// --- Test 5: "BY CASH", "ATM DEP", "BNADEP" credits counted in cashPct ---
+const cashTxns: Txn[] = [
+  { date: new Date(2026, 0, 5), narration: "BY CASH DEPOSIT AT BRANCH", credit: 10000, debit: 0, balance: 10000 },
+  { date: new Date(2026, 0, 10), narration: "ATM DEP MACHINE CASH", credit: 5000, debit: 0, balance: 15000 },
+  { date: new Date(2026, 0, 15), narration: "BNADEP CASH INWARD", credit: 5000, debit: 0, balance: 20000 },
+  { date: new Date(2026, 0, 20), narration: "UPI TRANSFER IN", credit: 20000, debit: 0, balance: 40000 },
+];
+// Pad to 15 txns across 3 months for analyze
+for (let i = 1; i <= 12; i++) {
+  cashTxns.push({
+    date: new Date(2026, Math.floor(i / 5), (i % 25) + 1),
+    narration: "UPI GROCERY STORE",
+    debit: 500,
+    credit: 0,
+    balance: 40000 - i * 500,
+  });
+}
+const cashAnalysis = analyze(cashTxns);
+// Cash credits = 10000 + 5000 + 5000 = 20000; Total credits = 40000 -> cashPct = 50%
+assert.strictEqual(cashAnalysis.cashPct, 50, `Expected cashPct to be 50%, got ${cashAnalysis.cashPct}%`);
+
+// --- Test 6: Bounces & EMI & Insurance keyword distinctions ---
+// Bounce keywords: ACH RTN--05-10-2026
+assert.ok(BOUNCE_RE.test("ACH RTN--05-10-2026"), "ACH RTN--05-10-2026 must match BOUNCE_RE");
+assert.ok(BOUNCE_RE.test("ECSRTN123456"), "ECSRTN must match BOUNCE_RE");
+assert.ok(BOUNCE_RE.test("NACH RTN RETURN"), "NACH RTN must match BOUNCE_RE");
+
+// EMI vs Insurance:
+// ACH/LIC OF INDIA is NOT EMI
+assert.strictEqual(isObligationDebit("ACH/LIC OF INDIA"), false, "ACH/LIC OF INDIA must NOT be treated as EMI");
+assert.strictEqual(isObligationDebit("ACH/STAR HEALTH INSURANCE"), false, "ACH/STAR HEALTH INSURANCE must NOT be treated as EMI");
+// ACH/BAJAJ FINANCE LTD is EMI
+assert.ok(isObligationDebit("ACH/BAJAJ FINANCE LTD"), "ACH/BAJAJ FINANCE LTD must be treated as EMI");
+// Compound lender name without boundary: HDBFINANCIALSERLTD
+assert.ok(isObligationDebit("HDBFINANCIALSERLTD/LOAN"), "HDBFINANCIALSERLTD must be treated as EMI");
+// Loan-account transfer pattern: TO123456NA123456
+assert.ok(isObligationDebit("TRF TO123456NA12345678 FOR LOAN"), "TO\\d{6}N[A-Z]\\d{6,} must be treated as EMI");
+// Pure "ACH/" is not EMI
+assert.strictEqual(isObligationDebit("ACH/9876543210"), false, "Plain ACH/ without lender must NOT be treated as EMI");
+
+// Wallet keywords: MBK, MOBIKWIK, ONE MOBI, MBKCCBP, MBKWALLETADD
+assert.ok(WALLET_RE.test("UPI/MBKWALLETADD/123"), "MBKWALLETADD must match WALLET_RE");
+assert.ok(WALLET_RE.test("PG/MBKCCBP/BILL"), "MBKCCBP must match WALLET_RE");
+assert.ok(WALLET_RE.test("ONE MOBI DIGITAL"), "ONE MOBI must match WALLET_RE");
+
+// Insurance premium tracked in AnalysisResult
+const insuranceTxns: Txn[] = [
+  { date: new Date(2026, 0, 5), narration: "ACH/LIC OF INDIA", debit: 4500, credit: 0, balance: 10000 },
+  { date: new Date(2026, 0, 10), narration: "STAR HEALTH INSURANCE PREMIUM", debit: 3500, credit: 0, balance: 6500 },
+  { date: new Date(2026, 0, 15), narration: "SALARY CREDIT TECH CORP", debit: 0, credit: 50000, balance: 56500 },
+];
+for (let i = 1; i <= 13; i++) {
+  insuranceTxns.push({
+    date: new Date(2026, Math.floor(i / 5), (i % 25) + 1),
+    narration: "GROCERY EXPENSE",
+    debit: 200,
+    credit: 0,
+    balance: 50000 - i * 200,
+  });
+}
+const insAnalysis = analyze(insuranceTxns);
+assert.strictEqual(insAnalysis.insurancePayments, 8000, `Expected insurancePayments 8000, got ${insAnalysis.insurancePayments}`);
+assert.strictEqual(insAnalysis.monthlyEmi, 0, "Insurance payments must not count towards monthlyEmi");
+
+// --- Test 7: Self-transfer detection with token prefix match (min 5 chars) ---
+assert.ok(isSelfTransfer("UPI/JOYDEEP/AXIS", "JOYDEEP BANERJEE"), "Full first name match must detect self-transfer");
+assert.ok(isSelfTransfer("UPI/Mr JOYDE/HDFC", "JOYDEEP BANERJEE"), "Truncated 5-char prefix JOYDE must detect self-transfer");
+assert.strictEqual(isSelfTransfer("UPI/RAMESH/HDFC", "JOYDEEP BANERJEE"), false, "Different name must NOT detect self-transfer");
+
 console.log(
-  "All unit test assertions (Axis fixture + 4 scenarios + 5 loanCheck tests + 6 salary tests + 6 otherCredits tests + 7 accountInfo tests + AI fallback test) passed successfully!"
+  "All unit test assertions (Axis fixture + PNB ONE tests + 4 scenarios + 5 loanCheck tests + 6 salary tests + 6 otherCredits tests + 7 accountInfo tests + AI fallback test) passed successfully!"
 );

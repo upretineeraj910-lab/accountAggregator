@@ -2,8 +2,8 @@
 // Secure API endpoint for rule-based bank statement financial analysis
 
 import { NextRequest, NextResponse } from "next/server";
-import { pdfToLines } from "@/lib/pdfText";
-import { parseTxnsWithDebug } from "@/lib/parse";
+import { pdfToRows, rowsToLines } from "@/lib/pdfText";
+import { parseStatementWithDebug } from "@/lib/parse";
 import { analyze, marketActivity } from "@/lib/analyze";
 import { generateAiAssessment, type AiSummary } from "@/lib/ai";
 
@@ -67,9 +67,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const arrayBuffer = await file.arrayBuffer();
     const buf = Buffer.from(arrayBuffer);
 
-    // Extract lines and parse transactions
-    const lines = await pdfToLines(buf, password);
-    const { txns, narrationFirst } = parseTxnsWithDebug(lines);
+    // Extract rows and lines, and parse transactions using format auto-detection
+    const rows = await pdfToRows(buf, password);
+    const lines = rowsToLines(rows);
+    const {
+      txns,
+      profile,
+      anchorsCount,
+      droppedFragmentsCount,
+      balanceMismatchCount,
+      narrationFirst,
+    } = parseStatementWithDebug(rows);
 
     // If fewer than 5 transactions, return 422
     if (txns.length < 5) {
@@ -100,6 +108,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       count: number;
       result: typeof analysis & { market: typeof market; ai: AiSummary };
       debug?: {
+        profile: "pnb" | "axis" | "generic";
+        anchorsCount: number;
+        droppedFragmentsCount: number;
+        balanceMismatchCount: number;
         narrationFirst: boolean;
         lines: string[];
         sampleTxns: Array<{
@@ -120,13 +132,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     };
 
     // Small debug option: ?debug=1 AND NODE_ENV !== "production"
-    // Returns first 40 extracted lines, first 10 sample txns, and the narrationFirst mode
+    // Returns profile, anchorsCount, droppedFragmentsCount, balanceMismatchCount, first 40 extracted lines, and first 10 sample txns
     const { searchParams } = new URL(req.url);
     if (
       searchParams.get("debug") === "1" &&
       process.env.NODE_ENV !== "production"
     ) {
       responsePayload.debug = {
+        profile,
+        anchorsCount,
+        droppedFragmentsCount,
+        balanceMismatchCount,
         narrationFirst,
         lines: lines.slice(0, 40),
         sampleTxns: txns.slice(0, 10).map((t) => ({

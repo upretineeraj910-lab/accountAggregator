@@ -1,17 +1,22 @@
 // lib/pdfText.ts
-// Step 1: PDF to lines
-// pdfjs-dist ka legacy build, Node.js / Vercel serverless ke liye.
+// Step 1: PDF to lines & rows
+// pdfjs-dist legacy build for Node.js / Vercel serverless environment.
 
-// @ts-ignore - pdfjs-dist legacy .mjs ke types nahi milte
+// @ts-ignore - pdfjs-dist legacy .mjs types
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
-// @ts-ignore - worker ko memory mein bind karna hai (Vercel pe file path se load nahi hota)
+// @ts-ignore - in-memory worker binding for serverless environments
 import * as pdfjsWorker from "pdfjs-dist/legacy/build/pdf.worker.mjs";
 
-// pdfjs "fake worker" mode mein globalThis.pdfjsWorker.WorkerMessageHandler dhundta hai.
-// Hamesha set karo, taaki ./pdf.worker.mjs ko filesystem se import na karna pade.
+// Ensure pdfjs fake worker mode uses in-memory WorkerMessageHandler
 (globalThis as { pdfjsWorker?: unknown }).pdfjsWorker = pdfjsWorker;
 
 export const PAGE = "<<PAGE>>";
+
+export type Row = {
+  text: string;
+  y: number;
+  page: number;
+};
 
 interface TextItemLike {
   str: string;
@@ -36,16 +41,12 @@ interface TextRow {
 const Y_TOLERANCE = 3.5;
 
 /**
- * In-memory PDF buffer se lines nikalta hai (reading order mein).
- * - Har page ke pehle PAGE marker push hota hai.
- * - Items ko y se rows mein group karta hai, rows top to bottom, items left to right.
- * - Password galat ya missing ho to pdfjs "PasswordException" throw karta hai,
- *   jo caller (API route) tak propagate hone dena hai.
+ * Extracts rows with precise vertical (y) coordinates and page numbers from in-memory PDF buffer.
  */
-export async function pdfToLines(
+export async function pdfToRows(
   buf: Buffer,
   password?: string
-): Promise<string[]> {
+): Promise<Row[]> {
   const loadingTask = pdfjs.getDocument({
     data: new Uint8Array(buf),
     password: password || undefined,
@@ -54,12 +55,10 @@ export async function pdfToLines(
   });
 
   const doc = await loadingTask.promise;
-  const allLines: string[] = [];
+  const allRows: Row[] = [];
 
   try {
     for (let pageNum = 1; pageNum <= doc.numPages; pageNum++) {
-      allLines.push(PAGE);
-
       const page = await doc.getPage(pageNum);
       const content = await page.getTextContent();
 
@@ -95,12 +94,45 @@ export async function pdfToLines(
           .join(" ")
           .replace(/\s+/g, " ")
           .trim();
-        if (line) allLines.push(line);
+        if (line) {
+          allRows.push({
+            text: line,
+            y: row.y,
+            page: pageNum,
+          });
+        }
       }
     }
   } finally {
     await doc.destroy();
   }
 
+  return allRows;
+}
+
+/**
+ * Converts Row objects into string lines with PAGE delimiter, preserving backwards compatibility.
+ */
+export function rowsToLines(rows: Row[]): string[] {
+  const allLines: string[] = [];
+  let currentPage = -1;
+  for (const r of rows) {
+    if (r.page !== currentPage) {
+      allLines.push(PAGE);
+      currentPage = r.page;
+    }
+    allLines.push(r.text);
+  }
   return allLines;
+}
+
+/**
+ * In-memory PDF buffer to lines array with PAGE markers.
+ */
+export async function pdfToLines(
+  buf: Buffer,
+  password?: string
+): Promise<string[]> {
+  const rows = await pdfToRows(buf, password);
+  return rowsToLines(rows);
 }

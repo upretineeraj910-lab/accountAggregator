@@ -4,6 +4,7 @@
 // Pure functions, no side effects, deterministic and unit-testable.
 
 import type { Txn } from "./parse.ts";
+import { SALARY_KW_REGEX, CORP_KEYWORDS } from "./keywords.ts";
 
 export type SalaryCredit = {
   date: Date;
@@ -14,27 +15,16 @@ export type SalaryCredit = {
 };
 
 export type SalaryResult = {
-  credits: SalaryCredit[]; // Deduplicated salary credits (highest credit per month)
+  credits: SalaryCredit[]; // Deduplicated salary credits (highest credit per month within median +/-40%)
   avgSalary: number; // Average of per-month max credits across salary months
   months: number; // Number of months salary was received
   method: "keyword" | "recurring" | "none";
+  extraCredits?: SalaryCredit[]; // Outlier credits from salary sender (e.g. arrears/reimbursements)
 };
-
-// Keyword regex helper matching alternatives flanked by non-alphanumerics
-const kw = (alts: string): RegExp =>
-  new RegExp(`(?<![A-Za-z0-9])(?:${alts})(?![A-Za-z0-9])`, "i");
-
-// Step A: Keyword regex matching explicit salary indicators
-export const SALARY_KW_REGEX =
-  /(?<![A-Za-z0-9])(?:SALARY|SAL|PAYROLL|WAGES|STIPEND|REMUNERATION|SAL[\s_/-]+(?:CR|CREDIT|TRF|TRANSFER)|SALARY[\s_/-]+(?:CR|CREDIT|TRF|TRANSFER)|MONTHLY[\s_/-]+SAL(?:ARY)?|SAL(?:ARY)?[\s_/-]+FOR)(?![A-Za-z0-9])/i;
-
-// Corporate entity and employer indicators
-export const CORP_KEYWORDS =
-  /\b(?:PVT\s*LTD|PRIVATE\s*LIMITED|LIMITED|LTD|CORP|CORPORATION|TECHNOLOGIES|TECH|SOLUTIONS|SERVICES|CONSULTANCY|ENTERPRISES|SYSTEMS|INDUSTRIES|HOLDINGS|VENTURES|INFOTECH|SOFTWARE|LABS|LLP|INC)\b/i;
 
 // Known bank names / routing tokens to clean from sender segments
 const BANK_NAMES_RE =
-  /\b(?:HDFC|ICICI|AXIS|SBI|CITI|KOTAK|CANARA|PNB|YES|BOB|BARODA|UNION|INDIAN|FEDERAL|IDFC|INDUSIND)\w*\s*(?:BANK|BK)?\b/gi;
+  /\b(?:HDFC|ICICI|AXIS|SBI|CITI|KOTAK|CANARA|PNB|PUNB|YES|BOB|BARODA|UNION|INDIAN|FEDERAL|IDFC|INDUSIND)\w*\s*(?:BANK|BK)?\b/gi;
 
 // UPI reference tokens (e.g. AXL6ee25..., ICI40c1..., IBLb5b43...)
 const UPI_REF_RE = /\b(?:AXL|ICI|IBL|YES|SBI|HDF|PAY)[0-9a-z]{8,}\b/gi;
@@ -63,7 +53,7 @@ function cleanSegmentText(str: string): string {
 
 /**
  * Extracts a normalized company/sender name from a bank narration line.
- * Filters out UTR/reference numbers, bank names, routing prefixes, and account holder name.
+ * Strips NEFT_IN:xxxx / UTR tokens, then selects segments with >= 60% alphabetic content.
  */
 export function extractSenderKey(
   narration: string,
@@ -87,13 +77,28 @@ export function extractSenderKey(
     }
   }
 
-  // Priority 2: Split by common delimiters and evaluate segments
-  const rawSegments = upper.split(/[/\\:;-]+/);
+  // Strip NEFT_IN: tokens and UTR-style codes before segmenting
+  const stripped = upper
+    .replace(/\bNEFT_IN:[A-Z0-9_/-]+/gi, " ")
+    .replace(/\bNEFT_IN\b/gi, " ")
+    .replace(/\b[A-Z]{4}[0-9]{7,}\b/gi, " ");
+
+  const rawSegments = stripped.split(/[/\\:;|,]+/);
   let bestCandidate: string | null = null;
   let bestScore = -1;
 
   for (const rawSeg of rawSegments) {
-    let seg = cleanSegmentText(rawSeg);
+    const rawTrimmed = rawSeg.trim();
+    if (rawTrimmed.length < 3) continue;
+
+    // Check alphabet ratio: segment must have >= 60% letters among non-space characters
+    const lettersCount = (rawTrimmed.match(/[A-Z]/g) || []).length;
+    const nonSpaceChars = rawTrimmed.replace(/\s+/g, "").length;
+    if (nonSpaceChars === 0) continue;
+    const alphabetRatio = lettersCount / nonSpaceChars;
+    if (alphabetRatio < 0.6) continue;
+
+    let seg = cleanSegmentText(rawTrimmed);
     if (seg.length < 3) continue;
 
     // Skip segments that represent the account holder's name (beneficiary)
@@ -101,11 +106,9 @@ export function extractSenderKey(
       continue;
     }
 
-    const letters = (seg.match(/[A-Z]/g) || []).length;
-    if (letters < 3) continue;
-
     let score = seg.length;
     if (CORP_KEYWORDS.test(seg)) score += 100;
+    if (/TREASURY|PAYROLL|SALARY|WAGES/i.test(seg)) score += 80;
 
     if (score > bestScore) {
       bestScore = score;
@@ -168,16 +171,15 @@ function calculateMedian(numbers: number[]): number {
 
 /**
  * Robust salary detection algorithm:
- * Step A: Explicit keyword matching (SALARY, SAL, PAYROLL, etc.)
- * Step B: Recurring sender / corporate employer analysis
- * Step C: Monthly deduplication (highest credit per calendar month)
+ * Step A: Explicit keyword matching (SALARY, SAL, PAYROLL, TREASURY, etc.)
+ * Step B: Recurring sender / corporate employer analysis (anywhere in narration)
+ * Step C: Monthly deduplication and outlier / arrears filtering (median +/- 40%)
  */
 export function detectSalary(txns: Txn[], holderName?: string): SalaryResult {
   const totalMonthKeys = new Set<string>();
   for (const t of txns) {
     totalMonthKeys.add(`${t.date.getFullYear()}-${t.date.getMonth()}`);
   }
-  const totalMonths = Math.max(1, totalMonthKeys.size);
 
   // ----------------------------------------------------
   // Step A: Explicit Keyword Detection
@@ -226,6 +228,12 @@ export function detectSalary(txns: Txn[], holderName?: string): SalaryResult {
       ) {
         continue;
       }
+
+      // Check for electronic transfer protocol anywhere in narration (NEFT, RTGS, IMPS, NEFT_IN) or corporate keyword
+      const hasProtocol =
+        /(?:NEFT|RTGS|IMPS|NEFT_IN)/i.test(t.narration) ||
+        CORP_KEYWORDS.test(t.narration);
+      if (!hasProtocol) continue;
 
       const sKey = extractSenderKey(t.narration, holderName);
       if (!sKey) continue;
@@ -296,7 +304,7 @@ export function detectSalary(txns: Txn[], holderName?: string): SalaryResult {
         }
       }
 
-      const isCorporate = CORP_KEYWORDS.test(sKey);
+      const isCorporate = CORP_KEYWORDS.test(sKey) || /TREASURY/i.test(sKey);
       const consistencyRatio = consistentCount / monthlyAmounts.length;
 
       // Senders must have either a corporate entity name or consistent amounts
@@ -333,8 +341,7 @@ export function detectSalary(txns: Txn[], holderName?: string): SalaryResult {
   }
 
   // ----------------------------------------------------
-  // Step C: Per-Month Deduplication
-  // Keep only the highest salary credit per (year, month)
+  // Step C: Per-Month Deduplication & Outlier Filtering
   // ----------------------------------------------------
   if (chosenCredits.length === 0) {
     return {
@@ -342,11 +349,33 @@ export function detectSalary(txns: Txn[], holderName?: string): SalaryResult {
       avgSalary: 0,
       months: 0,
       method: "none",
+      extraCredits: [],
     };
   }
 
-  const monthMap = new Map<string, SalaryCredit>();
+  // Outlier / Arrears filtering: credits outside median +/- 40% are flagged as extraCredits
+  const allAmounts = chosenCredits.map((c) => c.amount);
+  const medianSalary = calculateMedian(allAmounts);
+
+  const regularCredits: SalaryCredit[] = [];
+  const extraCredits: SalaryCredit[] = [];
+
   for (const c of chosenCredits) {
+    if (
+      medianSalary > 0 &&
+      Math.abs(c.amount - medianSalary) / medianSalary > 0.4
+    ) {
+      extraCredits.push(c);
+    } else {
+      regularCredits.push(c);
+    }
+  }
+
+  const creditsToDedupe =
+    regularCredits.length > 0 ? regularCredits : chosenCredits;
+
+  const monthMap = new Map<string, SalaryCredit>();
+  for (const c of creditsToDedupe) {
     const key = `${c.date.getFullYear()}-${String(c.date.getMonth() + 1).padStart(2, "0")}`;
     const existing = monthMap.get(key);
     if (!existing || c.amount > existing.amount) {
@@ -369,5 +398,6 @@ export function detectSalary(txns: Txn[], holderName?: string): SalaryResult {
     avgSalary,
     months: deduplicatedCredits.length,
     method: chosenMethod,
+    extraCredits,
   };
 }

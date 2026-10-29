@@ -2,6 +2,10 @@
 // Step 2: Lines to transactions
 // Pure function, no side effects, easily testable.
 
+import type { Row } from "./pdfText.ts";
+import { rowsToLines } from "./pdfText.ts";
+import { isPnb, parsePnb } from "./profiles/pnb.ts";
+
 export const PAGE = "<<PAGE>>";
 
 export type Txn = {
@@ -388,4 +392,82 @@ export function parseTxnsWithDebug(lines: string[]): {
   const { narrationFirst } = groupRows(lines);
   const txns = parseTxns(lines);
   return { txns, narrationFirst };
+}
+
+export interface ParseResultWithDebug {
+  txns: Txn[];
+  profile: "pnb" | "axis" | "generic";
+  anchorsCount: number;
+  droppedFragmentsCount: number;
+  balanceMismatchCount: number;
+  narrationFirst: boolean;
+}
+
+/**
+ * High-level parser that auto-detects statement format (e.g. PNB ONE profile)
+ * and falls back to standard generic/Axis parsing path.
+ */
+export function parseStatement(input: Row[] | string[]): Txn[] {
+  if (
+    Array.isArray(input) &&
+    input.length > 0 &&
+    typeof input[0] === "object" &&
+    "text" in input[0]
+  ) {
+    const rows = input as Row[];
+    if (isPnb(rows)) {
+      return parsePnb(rows).txns;
+    }
+    const lines = rowsToLines(rows);
+    return parseTxns(lines);
+  }
+  return parseTxns(input as string[]);
+}
+
+/**
+ * High-level parser with debug metadata: profile, anchorsCount, dropped fragments, and balance mismatches.
+ */
+export function parseStatementWithDebug(
+  input: Row[] | string[]
+): ParseResultWithDebug {
+  if (
+    Array.isArray(input) &&
+    input.length > 0 &&
+    typeof input[0] === "object" &&
+    "text" in input[0]
+  ) {
+    const rows = input as Row[];
+    if (isPnb(rows)) {
+      const pnbResult = parsePnb(rows);
+      return {
+        txns: pnbResult.txns,
+        profile: "pnb",
+        anchorsCount: pnbResult.debug.anchorsCount,
+        droppedFragmentsCount: pnbResult.debug.droppedFragmentsCount,
+        balanceMismatchCount: pnbResult.debug.balanceMismatchCount,
+        narrationFirst: false,
+      };
+    }
+    const lines = rowsToLines(rows);
+    const { txns, narrationFirst } = parseTxnsWithDebug(lines);
+    return {
+      txns,
+      profile: narrationFirst ? "axis" : "generic",
+      anchorsCount: txns.length,
+      droppedFragmentsCount: 0,
+      balanceMismatchCount: 0,
+      narrationFirst,
+    };
+  }
+
+  const lines = input as string[];
+  const { txns, narrationFirst } = parseTxnsWithDebug(lines);
+  return {
+    txns,
+    profile: narrationFirst ? "axis" : "generic",
+    anchorsCount: txns.length,
+    droppedFragmentsCount: 0,
+    balanceMismatchCount: 0,
+    narrationFirst,
+  };
 }

@@ -4,6 +4,17 @@
 
 import type { Txn } from "./parse.ts";
 import type { SalaryCredit } from "./salary.ts";
+import {
+  LOAN_APP_RE,
+  LOAN_LIKE_RE,
+  SELF_TRANSFER_RE,
+  WALLET_RE,
+  BROKER_RE,
+  REFUND_RE,
+  INTEREST_RE,
+  CASH_DEPOSIT_RE,
+  UPI_RE,
+} from "./keywords.ts";
 
 export type CreditCategory =
   | "SELF_TRANSFER"
@@ -33,47 +44,6 @@ export type OtherCreditsSummary = {
   salaryPct: number; // 100 - pctOfTotalCredit
 };
 
-// Keyword regex helper matching alternatives flanked by non-alphanumerics
-const kw = (alts: string): RegExp =>
-  new RegExp(`(?<![A-Za-z0-9])(?:${alts})(?![A-Za-z0-9])`, "i");
-
-// 1. Lending Apps
-const LOAN_APP_RE = kw(
-  "KREDITBEE|MONEYVIEW|CASHE|FIBE|EARLYSALARY|NIRA|LAZYPAY|SLICE|KISSHT|STASHFIN|PAYSENSE|MONEYTAP|FLEXSALARY|ZESTMONEY|TRUECREDIT|INDIALENDS"
-);
-
-// 2. Loan Disbursal Indicators
-const LOAN_LIKE_RE = kw(
-  "DISB|DISBURS|LDISB|LOAN\\s*CR|DISBURSEMENT|LOAN\\s+DISBURSAL"
-);
-
-// 3. Self Transfer Indicators
-const SELF_TRANSFER_RE = kw(
-  "SELF|OWN\\s+ACC|OWN\\s+ACCOUNT|SELF\\s+TRF|SELF\\s+TRANSFER"
-);
-
-// 4. Wallet Indicators
-const WALLET_RE = kw(
-  "PAYTM\\s+WALLET|PHONEPE\\s+WALLET|AMAZON\\s+PAY|MOBIKWIK|FREECHARGE|WALLET\\s+LOAD|ADD\\s+MONEY|PAYTM\\s+PAYMENTS\\s+BANK|PPBL|WALLET"
-);
-
-// 5. Broker Indicators
-const BROKER_RE = kw(
-  "ZERODHA|GROWW|UPSTOX|ANGEL\\s+ONE|ANGEL\\s+BROKING|ICICI\\s*SEC|ICICIDIRECT|HDFC\\s*SEC|KOTAK\\s*SEC|5PAISA|PAYTM\\s+MONEY|SHAREKHAN|MOTILAL|NSE\\s+CLEARING|INDIAN\\s+CLEARING|ICCL|NSCCL"
-);
-
-// 6. Refund Indicators
-const REFUND_RE = kw("REFUND|REVERSAL|CASHBACK|RETURN|CHQ\\s*RET");
-
-// 7. Interest Indicators
-const INTEREST_RE = kw("INT\\.?PD|INTEREST|INT\\.PAID|CR\\s+INT|SAVINGS\\s+INT");
-
-// 8. Cash Deposit Indicators
-const CASH_RE = kw("CASH\\s*DEP|CDM|CASH\\s+DEPOSIT");
-
-// 9. UPI / P2A Indicators
-const UPI_RE = kw("UPI|P2A|P2P");
-
 const ALL_CATEGORIES: CreditCategory[] = [
   "SELF_TRANSFER",
   "LOAN_LIKE",
@@ -88,6 +58,63 @@ const ALL_CATEGORIES: CreditCategory[] = [
 ];
 
 /**
+ * Checks if a transaction is a self-transfer.
+ * Matches explicit self keywords, full holder name, token prefix match (min 5 chars),
+ * or UPI P2A pattern.
+ */
+export function isSelfTransfer(
+  narration: string,
+  holderName?: string
+): boolean {
+  if (!narration) return false;
+  const narUpper = narration.toUpperCase();
+
+  // 1. Explicit self keywords
+  if (SELF_TRANSFER_RE.test(narration)) {
+    return true;
+  }
+
+  // 2. Holder name matching
+  if (holderName && holderName.trim().length >= 3) {
+    const cleanHolder = holderName.trim().toUpperCase();
+
+    // Exact full name match
+    if (narUpper.includes(cleanHolder)) {
+      return true;
+    }
+
+    // Token prefix match: first token of at least 5 characters (e.g. "JOYDEEP" -> prefix "JOYDE")
+    const nameWithoutTitles = cleanHolder
+      .replace(/\b(?:MR|MS|MRS|DR|SH|SMT)\b\.?/gi, " ")
+      .replace(/[^A-Z\s]/g, " ")
+      .trim();
+    const tokens = nameWithoutTitles.split(/\s+/).filter((w) => w.length >= 5);
+
+    if (tokens.length > 0) {
+      const firstToken = tokens[0];
+      const prefix5 = firstToken.slice(0, 5);
+
+      if (narUpper.includes(firstToken) || narUpper.includes(prefix5)) {
+        return true;
+      }
+    }
+
+    // UPI P2A pattern with first word >= 3 chars
+    const firstWord = cleanHolder.split(/\s+/)[0];
+    if (
+      firstWord &&
+      firstWord.length >= 3 &&
+      /UPI.*P2A|P2A.*UPI|UPI.*\/|P2A.*\//i.test(narUpper) &&
+      narUpper.includes(firstWord)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
  * Categorizes a single non-salary credit based on strict precedence rules.
  */
 function categorizeCredit(
@@ -95,8 +122,6 @@ function categorizeCredit(
   avgSalary: number,
   holderName?: string
 ): { category: CreditCategory; risk: "high" | "medium" | "low" } {
-  const narUpper = t.narration.toUpperCase();
-
   // 1. Lending Apps (Risk: High)
   if (LOAN_APP_RE.test(t.narration)) {
     return { category: "LENDING_APP", risk: "high" };
@@ -112,29 +137,7 @@ function categorizeCredit(
   }
 
   // 3. Self-Transfer (Risk: Medium)
-  // Holder name match OR explicit self keyword OR same-person UPI P2A pattern
-  let isSelf = false;
-  if (SELF_TRANSFER_RE.test(t.narration)) {
-    isSelf = true;
-  } else if (holderName && holderName.trim().length >= 3) {
-    const cleanHolder = holderName.trim().toUpperCase();
-    if (narUpper.includes(cleanHolder)) {
-      isSelf = true;
-    } else {
-      // Check first word of holder's name in UPI P2A patterns (e.g. "NAVEEN D/CNRB")
-      const firstWord = cleanHolder.split(/\s+/)[0];
-      if (
-        firstWord &&
-        firstWord.length >= 3 &&
-        /UPI.*P2A|P2A.*UPI|UPI.*\/|P2A.*\//i.test(narUpper) &&
-        narUpper.includes(firstWord)
-      ) {
-        isSelf = true;
-      }
-    }
-  }
-
-  if (isSelf) {
+  if (isSelfTransfer(t.narration, holderName)) {
     return { category: "SELF_TRANSFER", risk: "medium" };
   }
 
@@ -159,7 +162,7 @@ function categorizeCredit(
   }
 
   // 8. Cash / CDM Deposits (Risk: Medium)
-  if (CASH_RE.test(t.narration)) {
+  if (CASH_DEPOSIT_RE.test(t.narration)) {
     return { category: "CASH", risk: "medium" };
   }
 

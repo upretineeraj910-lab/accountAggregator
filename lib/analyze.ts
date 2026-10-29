@@ -10,6 +10,22 @@ import {
 } from "./otherCredits.ts";
 import { extractAccountInfo, type AccountInfo } from "./accountInfo.ts";
 import type { AiSummary } from "./ai.ts";
+import {
+  kw,
+  CASH_DEPOSIT_RE,
+  BOUNCE_RE,
+  INSURANCE_RE,
+  isObligationDebit,
+  SALARY_KW_REGEX,
+  WALLET_RE,
+  LOAN_APP_RE,
+  BETTING_RE,
+  BROKER_RE,
+  MF_SIP_RE,
+  CC_PAYMENT_RE,
+} from "./keywords.ts";
+
+export { kw };
 
 export interface Reason {
   text: string;
@@ -76,6 +92,7 @@ export interface AnalysisResult {
   };
   lendingApps: { count: number; total: number };
   creditCardPayments: number;
+  insurancePayments: number;
   emiCapacity: number | null;
   salary: SalaryResult;
   otherCredits: OtherCreditsSummary;
@@ -153,45 +170,6 @@ const SHORT_MONTHS = [
 ];
 
 /**
- * Keyword regex helper that matches alternatives flanked by non-alphanumeric characters or start/end of string.
- * Prevents false substring matches (e.g. 'NSE' inside 'LICENSE'), while correctly matching '_EMI_'.
- */
-export const kw = (alts: string): RegExp =>
-  new RegExp(`(?<![A-Za-z0-9])(?:${alts})(?![A-Za-z0-9])`, "i");
-
-// All keyword regexes built via kw helper
-const EMI_REGEX = kw("EMI|NACH|ECS|LOAN");
-const SALARY_REGEX = kw("SALARY|SAL");
-const BOUNCE_REGEX = kw("RETURN|BOUNCE|CHQ\\s*RET|INSUFFICIENT");
-const BETTING_REGEX = kw("DREAM11|RUMMY|MPL|BETTING");
-const CASH_REGEX = kw("CASH\\s*DEP|CDM");
-
-// Broker regex
-const BROKER_REGEX = kw(
-  "ZERODHA|GROWW|UPSTOX|ANGEL\\s+ONE|ANGEL\\s+BROKING|ICICI\\s*SEC|ICICIDIRECT|HDFC\\s*SEC|KOTAK\\s*SEC|5PAISA|PAYTM\\s+MONEY|SHAREKHAN|MOTILAL|NSE\\s+CLEARING|INDIAN\\s+CLEARING|ICCL|NSCCL"
-);
-
-// Mutual fund / SIP regex
-const MF_SIP_REGEX = kw(
-  "BSE\\s+STAR|NSE\\s+NMF|MF\\s+UTILITIES|MUTUAL\\s+FUND|SIP|CAMS|KFIN"
-);
-
-// Wallet regex
-const WALLET_REGEX = kw(
-  "PAYTM\\s+WALLET|PHONEPE\\s+WALLET|AMAZON\\s+PAY|MOBIKWIK|FREECHARGE|WALLET\\s+LOAD|ADD\\s+MONEY|PAYTM\\s+PAYMENTS\\s+BANK|PPBL"
-);
-
-// Instant lending apps regex
-const LOAN_APP_REGEX = kw(
-  "KREDITBEE|MONEYVIEW|CASHE|FIBE|EARLYSALARY|NIRA|LAZYPAY|SLICE|KISSHT|STASHFIN|PAYSENSE|MONEYTAP|FLEXSALARY|ZESTMONEY|TRUECREDIT|INDIALENDS"
-);
-
-// Credit card bill payment outflow regex
-const CC_PAYMENT_REGEX = kw(
-  "CRED|CREDIT\\s+CARD|CC\\s+PAYMENT|CARD\\s+PAYMENT|BILLDESK\\s+CC"
-);
-
-/**
  * Calculates share market and mutual fund / SIP activity from transactions.
  */
 export function marketActivity(
@@ -205,8 +183,8 @@ export function marketActivity(
   let sip = 0;
 
   for (const t of txns) {
-    const isBroker = BROKER_REGEX.test(t.narration);
-    const isMf = MF_SIP_REGEX.test(t.narration);
+    const isBroker = BROKER_RE.test(t.narration);
+    const isMf = MF_SIP_RE.test(t.narration);
 
     if (isBroker) {
       if (t.debit > 0) {
@@ -325,26 +303,27 @@ export function analyze(
   let lendingAppsTotal = 0;
 
   let ccDebitsSum = 0;
+  let insurancePayments = 0;
 
   for (const t of txns) {
     totalCredits += t.credit;
     totalDebits += t.debit;
     balanceSum += t.balance;
 
-    if (BOUNCE_REGEX.test(t.narration)) {
+    if (BOUNCE_RE.test(t.narration)) {
       bounces++;
     }
 
-    if (BETTING_REGEX.test(t.narration)) {
+    if (BETTING_RE.test(t.narration)) {
       betting++;
     }
 
-    if (t.credit > 0 && CASH_REGEX.test(t.narration)) {
+    if (t.credit > 0 && CASH_DEPOSIT_RE.test(t.narration)) {
       cashCreditsSum += t.credit;
     }
 
     // Wallet metrics
-    if (WALLET_REGEX.test(t.narration)) {
+    if (WALLET_RE.test(t.narration)) {
       if (t.credit > 0) {
         walletIn += t.credit;
         walletTxnCount++;
@@ -356,14 +335,19 @@ export function analyze(
     }
 
     // Lending apps metrics
-    if (LOAN_APP_REGEX.test(t.narration)) {
+    if (LOAN_APP_RE.test(t.narration)) {
       lendingAppsCount++;
       lendingAppsTotal += t.credit + t.debit;
     }
 
     // Credit card payments
-    if (t.debit > 0 && CC_PAYMENT_REGEX.test(t.narration)) {
+    if (t.debit > 0 && CC_PAYMENT_RE.test(t.narration)) {
       ccDebitsSum += t.debit;
+    }
+
+    // Insurance payments
+    if (t.debit > 0 && INSURANCE_RE.test(t.narration)) {
+      insurancePayments += t.debit;
     }
   }
 
@@ -373,6 +357,7 @@ export function analyze(
   walletOut = Math.round(walletOut * 100) / 100;
   lendingAppsTotal = Math.round(lendingAppsTotal * 100) / 100;
   ccDebitsSum = Math.round(ccDebitsSum * 100) / 100;
+  insurancePayments = Math.round(insurancePayments * 100) / 100;
 
   // avgMonthlyCredit
   const avgMonthlyCredit = Math.round((totalCredits / months) * 100) / 100;
@@ -385,9 +370,9 @@ export function analyze(
   // Primary income basis for scoring (avgSalary if identified, else avgMonthlyCredit)
   const incomeBasis = avgSalary > 0 ? avgSalary : avgMonthlyCredit;
 
-  // EMI calculations
+  // EMI calculations (using isObligationDebit)
   const emiTx = txns.filter(
-    (t) => t.debit > 0 && EMI_REGEX.test(t.narration)
+    (t) => t.debit > 0 && isObligationDebit(t.narration)
   );
   const emiMonthSet = new Set<string>();
   let emiDebitsSum = 0;
@@ -482,7 +467,7 @@ export function analyze(
       if (
         t.credit >= oneOffThreshold &&
         !salaryCreditTimes.has(t.date.getTime()) &&
-        !SALARY_REGEX.test(t.narration)
+        !SALARY_KW_REGEX.test(t.narration)
       ) {
         oneOffCount++;
         oneOffTotal += t.credit;
@@ -776,6 +761,14 @@ export function analyze(
     }
   }
 
+  // Insurance premium note in reasons
+  if (insurancePayments > 0) {
+    reasons.push({
+      text: `Insurance premium payments: ₹${insurancePayments.toLocaleString("en-IN")}`,
+      type: "positive",
+    });
+  }
+
   // ================= HARD CAPS =================
   if (
     passThroughPct >= CONFIG.limits.passThroughHigh &&
@@ -844,6 +837,7 @@ export function analyze(
     wallet,
     lendingApps,
     creditCardPayments,
+    insurancePayments,
     emiCapacity,
     salary,
     otherCredits,
@@ -1114,6 +1108,14 @@ export function recomputeWithSalary(
         type: "negative",
       });
     }
+  }
+
+  // Insurance premium note in reasons
+  if (result.insurancePayments > 0) {
+    reasons.push({
+      text: `Insurance premium payments: ₹${result.insurancePayments.toLocaleString("en-IN")}`,
+      type: "positive",
+    });
   }
 
   // Hard Caps

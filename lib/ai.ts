@@ -10,6 +10,8 @@ export interface AiSummary {
   enabled: boolean;
   executiveSummary?: string[];
   bullets?: string[];
+  riskHighlights?: string[];
+  recommendation?: string;
   errorNotice?: string;
 }
 

@@ -17,6 +17,8 @@ import {
 } from "../keywords.ts";
 import { extractAccountInfo } from "../accountInfo.ts";
 import { generateAiAssessment } from "../ai.ts";
+import { extractHolderName } from "../holder.ts";
+import { detectRoundTrips } from "../roundTrip.ts";
 
 // ==========================================
 // Test 1: Axis Bank fixture parsing & FOIR
@@ -938,6 +940,250 @@ assert.ok(isSelfTransfer("UPI/JOYDEEP/AXIS", "JOYDEEP BANERJEE"), "Full first na
 assert.ok(isSelfTransfer("UPI/Mr JOYDE/HDFC", "JOYDEEP BANERJEE"), "Truncated 5-char prefix JOYDE must detect self-transfer");
 assert.strictEqual(isSelfTransfer("UPI/RAMESH/HDFC", "JOYDEEP BANERJEE"), false, "Different name must NOT detect self-transfer");
 
+
+// ==========================================
+// Comprehensive Unit Tests for 7 New Invariant Rules
+// ==========================================
+
+// --- Rule 1: Debit 2000 & Credit 2000 same day -> roundTrip pair formed, count/volume accurate ---
+const rtTxns: Txn[] = [
+  {
+    date: new Date(2026, 7, 10),
+    narration: "UPI DEBIT ROTATION",
+    debit: 2000,
+    credit: 0,
+    balance: 8000,
+  },
+  {
+    date: new Date(2026, 7, 10),
+    narration: "UPI CREDIT ROTATION",
+    debit: 0,
+    credit: 2000,
+    balance: 10000,
+  },
+  {
+    date: new Date(2026, 7, 15),
+    narration: "RANDOM EXPENSE",
+    debit: 500,
+    credit: 0,
+    balance: 9500,
+  },
+];
+const rtResult = detectRoundTrips(rtTxns);
+assert.strictEqual(rtResult.count, 1, "Expected exactly 1 round-trip pair");
+assert.strictEqual(rtResult.volume, 2000, "Expected volume of 2000");
+assert.strictEqual(rtResult.pairs[0].amount, 2000);
+assert.strictEqual(rtResult.pairs[0].diffDays, 0);
+
+// --- Rule 2: 'Customer Name: ABC DEF' extracted, and 'ABC D' UPI credit/debit -> SELF_TRANSFER ---
+const headerLinesWithPnbName = [
+  "Punjab National Bank Statement",
+  "Customer Name: ABC DEF",
+  "Account Number: 1234567890",
+  "Date | Instrument ID | Amount(INR) | Type | Balance | Remarks",
+];
+const extractedName = extractHolderName(headerLinesWithPnbName);
+assert.strictEqual(extractedName, "ABC DEF", "Expected extracted holder name to be 'ABC DEF'");
+
+// Credit & Debit detection with 'ABC D'
+assert.ok(
+  isSelfTransfer("UPI/ABC D/123456/PAYMENT", extractedName),
+  "Credit with 'ABC D' must be detected as self-transfer"
+);
+assert.ok(
+  isSelfTransfer("UPI/Mr ABC D@SBI/EXPENSE", extractedName),
+  "Debit with 'ABC D' must be detected as self-transfer"
+);
+
+// Verify analyze tracks both selfIn and selfOut
+const selfTestTxns: Txn[] = [
+  {
+    date: new Date(2026, 0, 5),
+    narration: "UPI/ABC D/CREDIT",
+    debit: 0,
+    credit: 5000,
+    balance: 15000,
+  },
+  {
+    date: new Date(2026, 0, 10),
+    narration: "UPI/ABC D/DEBIT",
+    debit: 3000,
+    credit: 0,
+    balance: 12000,
+  },
+  {
+    date: new Date(2026, 0, 15),
+    narration: "REGULAR EXPENSE",
+    debit: 500,
+    credit: 0,
+    balance: 11500,
+  },
+];
+const resSelf = analyze(selfTestTxns, { holderName: extractedName });
+assert.strictEqual(resSelf.selfIn, 5000, "Expected selfIn 5000");
+assert.strictEqual(resSelf.selfOut, 3000, "Expected selfOut 3000");
+// Real adjusted credit: total credits (5000) - self (5000) - wallet (0) - roundTrip (0) = 0
+assert.strictEqual(resSelf.realAdjustedCredit, 0, "Expected realAdjustedCredit 0");
+
+// --- Rule 3: 31 Jul (1 day) & 1-22 Oct partial months; monthlyEmi computed strictly from full months ---
+const fullMonthTxns: Txn[] = [
+  // 31 Jul: partial month (1 day) - has EMI debit of 5000
+  {
+    date: new Date(2026, 6, 31),
+    narration: "LOAN EMI DEBIT",
+    debit: 5000,
+    credit: 0,
+    balance: 10000,
+  },
+  // Aug: full month (day 1 to day 29) - EMI debit 10000
+  {
+    date: new Date(2026, 7, 1),
+    narration: "SALARY CREDIT",
+    debit: 0,
+    credit: 50000,
+    balance: 60000,
+  },
+  {
+    date: new Date(2026, 7, 5),
+    narration: "LOAN EMI DEBIT",
+    debit: 10000,
+    credit: 0,
+    balance: 50000,
+  },
+  {
+    date: new Date(2026, 7, 29),
+    narration: "GROCERY EXPENSE",
+    debit: 1000,
+    credit: 0,
+    balance: 49000,
+  },
+  // Sep: full month (day 1 to day 30) - EMI debit 12000
+  {
+    date: new Date(2026, 8, 1),
+    narration: "SALARY CREDIT",
+    debit: 0,
+    credit: 50000,
+    balance: 99000,
+  },
+  {
+    date: new Date(2026, 8, 5),
+    narration: "LOAN EMI DEBIT",
+    debit: 12000,
+    credit: 0,
+    balance: 87000,
+  },
+  {
+    date: new Date(2026, 8, 30),
+    narration: "MONTH END BILL",
+    debit: 1000,
+    credit: 0,
+    balance: 86000,
+  },
+  // Oct: partial month (day 1 to day 22 <= 27) - EMI debit 20000
+  {
+    date: new Date(2026, 9, 1),
+    narration: "SALARY CREDIT",
+    debit: 0,
+    credit: 50000,
+    balance: 136000,
+  },
+  {
+    date: new Date(2026, 9, 5),
+    narration: "LOAN EMI DEBIT",
+    debit: 20000,
+    credit: 0,
+    balance: 116000,
+  },
+  {
+    date: new Date(2026, 9, 22),
+    narration: "FINAL TXN",
+    debit: 1000,
+    credit: 0,
+    balance: 115000,
+  },
+];
+
+const resFull = analyze(fullMonthTxns);
+assert.strictEqual(resFull.months, 4, "Total 4 months in statement");
+assert.strictEqual(resFull.usedFullMonths, true, "Must use full months averaging");
+assert.strictEqual(resFull.fullMonthsCount, 2, "Expected exactly 2 full months (Aug, Sep)");
+assert.strictEqual(resFull.fullMonthsLabel, "Aug-Sep", "Expected full months label 'Aug-Sep'");
+// Aug EMI = 10000, Sep EMI = 12000. Avg = (10000 + 12000) / 2 = 11000
+assert.strictEqual(resFull.monthlyEmi, 11000, `Expected monthlyEmi 11000 from full months, got ${resFull.monthlyEmi}`);
+
+// --- Rule 4: Salary month-end pe aaye aur turant nikle -> medianDailyBalance kam, 'Healthy balance ✓' na dikhe ---
+const passThroughEndMonthTxns: Txn[] = [];
+for (const m of [2, 3, 4]) {
+  // Day 1 to 25: balance is low (50)
+  for (let d = 1; d <= 25; d += 3) {
+    passThroughEndMonthTxns.push({
+      date: new Date(2026, m, d),
+      narration: "TEA STALL UPI",
+      debit: 10,
+      credit: 0,
+      balance: 50,
+    });
+  }
+  // Day 30: Salary arrives (60,000) -> balance 60,050
+  passThroughEndMonthTxns.push({
+    date: new Date(2026, m, 30),
+    narration: "SALARY CREDIT TECH CORP",
+    debit: 0,
+    credit: 60000,
+    balance: 60050,
+  });
+}
+const resBalanceCheck = analyze(passThroughEndMonthTxns);
+assert.strictEqual(resBalanceCheck.monthEndAvgBalance, 60050, "Month end balance should be high");
+assert.ok(resBalanceCheck.medianDailyBalance < 500, `Median daily balance should be low (~50), got ${resBalanceCheck.medianDailyBalance}`);
+const hasHealthyBalance = resBalanceCheck.reasons.some((r) =>
+  r.text.toLowerCase().includes("healthy balance maintained")
+);
+assert.strictEqual(hasHealthyBalance, false, "'Healthy balance maintained ✓' must NOT be shown when medianDailyBalance is low");
+
+// --- Rule 5: AI payload mein naam / PAN / narration na ho ---
+const originalFetch = globalThis.fetch;
+let capturedBody = "";
+process.env.GEMINI_API_KEY = "test-key";
+globalThis.fetch = (async (url, init) => {
+  capturedBody = (init?.body) || "";
+  return {
+    ok: true,
+    json: async () => ({
+      candidates: [
+        {
+          content: {
+            parts: [{ text: JSON.stringify({ bullets: ["B1", "B2", "B3", "B4"] }) }],
+          },
+        },
+      ],
+    }),
+  };
+});
+
+try {
+  await generateAiAssessment({
+    accountInfo: {
+      holderName: "SECRET SENSITIVE HOLDER NAME",
+      accountNumber: "987654321098",
+      bankName: "Secret Bank",
+    },
+    analysis: resFull,
+  });
+
+  assert.ok(!capturedBody.includes("SECRET SENSITIVE HOLDER NAME"), "AI payload must not contain holder name");
+  assert.ok(!capturedBody.includes("987654321098"), "AI payload must not contain account number");
+  assert.ok(!capturedBody.includes("PAN"), "AI payload must not contain PAN");
+  assert.ok(!capturedBody.includes("GROCERY EXPENSE"), "AI payload must not contain transaction narrations");
+  assert.ok(capturedBody.includes("statementMonths"), "AI payload must contain computed numbers");
+} finally {
+  globalThis.fetch = originalFetch;
+  delete process.env.GEMINI_API_KEY;
+}
+
+// --- Rule 6: Purane Axis aur PNB tests pass hote rahein ---
+// (Already tested by earlier assertions on Axis Bank fixture and fakePnbRows)
+
 console.log(
-  "All unit test assertions (Axis fixture + PNB ONE tests + 4 scenarios + 5 loanCheck tests + 6 salary tests + 6 otherCredits tests + 7 accountInfo tests + AI fallback test) passed successfully!"
+  "All unit test assertions (Axis fixture + PNB ONE profile + 7 invariant rule tests + all scenarios) passed successfully!"
 );

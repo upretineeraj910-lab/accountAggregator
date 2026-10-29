@@ -26,7 +26,12 @@ export const BOUNCE_RE = kw(
 // 3. Insurance (Information only, explicitly NOT loan obligation EMI)
 export const INSURANCE_RE = kw("LIC|INSURANCE|STAR\\s*HEA");
 
-// 4. Lender substring indicators (plain substring match to support compound lender names e.g. HDBFINANCIALSERLTD)
+// 4. Bill Pay & Card-like Pay Later (Informational only, explicitly NOT loan obligation EMI)
+export const BILL_PAY_LATER_RE = kw(
+  "BILLPAY|MBKCCBP|CCBP|AMAZON\\s*PAY\\s*LATER|AMAZONPAYLATER|OLA\\s*FIN"
+);
+
+// 5. Lender substring indicators (plain substring match to support compound lender names e.g. HDBFINANCIALSERLTD)
 export const LENDER_SUBSTRING_RE =
   /(?:FINANCE|FINSERV|FINANCIAL|BAJAJ|HDB\s*FIN|FULLERTON|MUTHOOT|MANAPPURAM|TATA\s*CAPITAL)/i;
 
@@ -38,12 +43,17 @@ export const BASE_EMI_RE = kw("EMI|NACH|ECS|LOAN");
 
 /**
  * Determines whether a debit transaction is an active loan / EMI obligation.
- * Explicitly excludes pure insurance premiums (e.g. "ACH/LIC OF INDIA").
+ * Explicitly excludes pure insurance premiums (e.g. "ACH/LIC OF INDIA")
+ * and bill pay / pay later lines (e.g. "BILLPAY", "AMAZON PAY LATER").
  */
 export function isObligationDebit(narration: string): boolean {
   if (!narration) return false;
   // Pure insurance is excluded unless explicit lender substring is present
   if (INSURANCE_RE.test(narration) && !LENDER_SUBSTRING_RE.test(narration)) {
+    return false;
+  }
+  // Bill pay / pay later is excluded from EMI unless explicit loan account transfer
+  if (BILL_PAY_LATER_RE.test(narration) && !LOAN_ACCOUNT_TRANSFER_RE.test(narration)) {
     return false;
   }
   if (LENDER_SUBSTRING_RE.test(narration)) {
@@ -58,7 +68,7 @@ export function isObligationDebit(narration: string): boolean {
   return false;
 }
 
-// 5. Salary Keywords (Expanded to include Treasury, PAO, DDO, Pension, Pay & Accounts)
+// 6. Salary Keywords (Expanded to include Treasury, PAO, DDO, Pension, Pay & Accounts)
 export const SALARY_KW_REGEX =
   /(?<![A-Za-z0-9])(?:SALARY|SAL|PAYROLL|WAGES|STIPEND|REMUNERATION|SAL[\s_/-]+(?:CR|CREDIT|TRF|TRANSFER)|SALARY[\s_/-]+(?:CR|CREDIT|TRF|TRANSFER)|MONTHLY[\s_/-]+SAL(?:ARY)?|SAL(?:ARY)?[\s_/-]+FOR|TREASURY|PAY\s*&\s*ACCOUNTS|\bPAO\b|\bDDO\b|PENSION)(?![A-Za-z0-9])/i;
 
@@ -66,51 +76,51 @@ export const SALARY_KW_REGEX =
 export const CORP_KEYWORDS =
   /\b(?:PVT\s*LTD|PRIVATE\s*LIMITED|LIMITED|LTD|CORP|CORPORATION|TECHNOLOGIES|TECH|SOLUTIONS|SERVICES|CONSULTANCY|ENTERPRISES|SYSTEMS|INDUSTRIES|HOLDINGS|VENTURES|INFOTECH|SOFTWARE|LABS|LLP|INC)\b/i;
 
-// 6. Wallets & Digital PG Loaders (Expanded to include MBK, ONE MOBI, MBKCCBP, MBKWALLETADD)
+// 7. Wallets & Digital PG Loaders (Expanded to include MBK, ONE MOBI, MBKCCBP, MBKWALLETADD)
 export const WALLET_RE = kw(
   "PAYTM\\s+WALLET|PHONEPE\\s+WALLET|AMAZON\\s+PAY|MOBIKWIK|FREECHARGE|WALLET\\s+LOAD|ADD\\s+MONEY|PAYTM\\s+PAYMENTS\\s+BANK|PPBL|WALLET|MBK|ONE\\s*MOBI|MBKCCBP|MBKWALLETADD"
 );
 
-// 7. Instant Fintech Lending Apps
+// 8. Instant Fintech Lending Apps
 export const LOAN_APP_RE = kw(
   "KREDITBEE|MONEYVIEW|CASHE|FIBE|EARLYSALARY|NIRA|LAZYPAY|SLICE|KISSHT|STASHFIN|PAYSENSE|MONEYTAP|FLEXSALARY|ZESTMONEY|TRUECREDIT|INDIALENDS"
 );
 
-// 8. Gambling & Online Betting
+// 9. Gambling & Online Betting
 export const BETTING_RE = kw("DREAM11|RUMMY|MPL|BETTING");
 
-// 9. Stock Brokers & Depository Clearing
+// 10. Stock Brokers & Depository Clearing
 export const BROKER_RE = kw(
   "ZERODHA|GROWW|UPSTOX|ANGEL\\s+ONE|ANGEL\\s+BROKING|ICICI\\s*SEC|ICICIDIRECT|HDFC\\s*SEC|KOTAK\\s*SEC|5PAISA|PAYTM\\s+MONEY|SHAREKHAN|MOTILAL|NSE\\s+CLEARING|INDIAN\\s+CLEARING|ICCL|NSCCL"
 );
 
-// 10. Mutual Fund & SIP
+// 11. Mutual Fund & SIP
 export const MF_SIP_RE = kw(
   "BSE\\s+STAR|NSE\\s+NMF|MF\\s+UTILITIES|MUTUAL\\s+FUND|SIP|CAMS|KFIN"
 );
 
-// 11. Credit Card Bill Payments
+// 12. Credit Card Bill Payments
 export const CC_PAYMENT_RE = kw(
   "CRED|CREDIT\\s+CARD|CC\\s+PAYMENT|CARD\\s+PAYMENT|BILLDESK\\s+CC"
 );
 
-// 12. Loan Disbursal Indicators
+// 13. Loan Disbursal Indicators
 export const LOAN_LIKE_RE = kw(
   "DISB|DISBURS|LDISB|LOAN\\s*CR|DISBURSEMENT|LOAN\\s+DISBURSAL"
 );
 
-// 13. Self-Transfer Indicators
+// 14. Self-Transfer Indicators
 export const SELF_TRANSFER_RE = kw(
   "SELF|OWN\\s+ACC|OWN\\s+ACCOUNT|SELF\\s+TRF|SELF\\s+TRANSFER"
 );
 
-// 14. Refunds & Reversals
+// 15. Refunds & Reversals
 export const REFUND_RE = kw("REFUND|REVERSAL|CASHBACK|RETURN|CHQ\\s*RET");
 
-// 15. Bank Interest
+// 16. Bank Interest
 export const INTEREST_RE = kw(
   "INT\\.?PD|INTEREST|INT\\.PAID|CR\\s+INT|SAVINGS\\s+INT"
 );
 
-// 16. Person UPI / P2A / P2P
+// 17. Person UPI / P2A / P2P
 export const UPI_RE = kw("UPI|P2A|P2P");

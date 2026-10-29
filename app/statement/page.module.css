@@ -361,6 +361,16 @@
   background-color: #f0fdf4;
 }
 
+.reasonNeutral {
+  color: #1e40af;
+  background-color: #eff6ff;
+}
+
+.reasonWarning {
+  color: #92400e;
+  background-color: #fffbeb;
+}
+
 .reasonNegative {
   color: #991b1b;
   background-color: #fef2f2;

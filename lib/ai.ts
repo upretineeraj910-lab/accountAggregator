@@ -1,6 +1,7 @@
 // lib/ai.ts
-// AI Layer for Bank Statement Analysis: Executive Underwriting Summary & Merchant Disambiguation
+// AI Layer for Bank Statement Analysis: Executive Underwriting Summary Guardrails
 // Zero external npm dependencies: uses native fetch with graceful fallback when GEMINI_API_KEY is not set.
+// Strict Guardrails: Only computed numbers are sent. Never includes names, PAN, address, mobile, or raw transactions.
 
 import type { AnalysisResult } from "./analyze";
 import type { AccountInfo } from "./accountInfo";
@@ -8,9 +9,7 @@ import type { AccountInfo } from "./accountInfo";
 export interface AiSummary {
   enabled: boolean;
   executiveSummary?: string[];
-  riskHighlights?: string[];
-  recommendation?: string;
-  employerInsight?: string;
+  bullets?: string[];
   errorNotice?: string;
 }
 
@@ -19,11 +18,12 @@ const FALLBACK_MODEL = "gemini-3.5-flash";
 
 /**
  * Generates an executive underwriting assessment using Google Gemini API.
- * Anonymizes PII (never sends full account numbers, customer addresses, or raw transaction logs).
+ * Anonymizes all PII: ONLY computed financial numbers are provided in the payload.
+ * Strictly avoids personal data (no names, PAN, address, mobile) and no raw transaction narrations.
  * Gracefully returns { enabled: false } if GEMINI_API_KEY is not configured or if API times out.
  */
 export async function generateAiAssessment(input: {
-  accountInfo: AccountInfo;
+  accountInfo?: AccountInfo;
   analysis: AnalysisResult;
 }): Promise<AiSummary> {
   const apiKey = process.env.GEMINI_API_KEY?.trim();
@@ -33,47 +33,40 @@ export async function generateAiAssessment(input: {
     return { enabled: false };
   }
 
-  const { accountInfo, analysis } = input;
+  const { analysis } = input;
 
-  // Prepare sanitized underwriting metrics (no PII, no account numbers, no sensitive addresses)
-  const sanitizedContext = {
-    bankName: accountInfo.bankName || "Unknown Bank",
-    accountType: accountInfo.accountType || "Savings Account",
+  // Prepare ONLY computed numbers (zero PII, zero personal data, zero narrations/transactions)
+  const sanitizedNumbers = {
     statementMonths: analysis.months,
+    fullMonthsAnalyzed: analysis.fullMonthsCount || analysis.months,
     avgMonthlySalary: Math.round(analysis.avgSalary),
-    detectedEmployer: analysis.salary?.credits?.length
-      ? accountInfo.holderName || "Verified Corporate Employer"
-      : "Not Clearly Identified",
-    primaryEmployerName: analysis.salary?.credits?.length
-      ? "Identified in Statement"
-      : "None",
     activeMonthlyEmi: Math.round(analysis.monthlyEmi),
     currentFoirPct: analysis.foir,
-    monthEndAvgBalance: Math.round(analysis.monthEndAvgBalance),
-    avgTxnBalanceAbb: Math.round(analysis.abb),
     chequeBouncesCount: analysis.bounces,
-    bettingGamblingCount: analysis.betting,
-    lendingAppsCount: analysis.lendingApps?.count || 0,
-    lendingAppsTotal: Math.round(analysis.lendingApps?.total || 0),
-    creditCardBillDebitsTotal: Math.round(analysis.creditCardPayments || 0),
+    cashDepositPct: Math.round(analysis.cashPct),
+    passThroughRatioPct: analysis.passThroughPct,
+    selfTransferInTotal: Math.round(analysis.selfIn || 0),
+    selfTransferOutTotal: Math.round(analysis.selfOut || 0),
+    roundTripCount: analysis.roundTrip?.count || 0,
+    roundTripVolume: Math.round(analysis.roundTrip?.volume || 0),
+    medianDailyBalance: Math.round(analysis.medianDailyBalance || 0),
+    minBalance: Math.round(analysis.minBalance || 0),
+    monthEndAvgBalance: Math.round(analysis.monthEndAvgBalance || 0),
+    preSalaryAvgBalance: Math.round(analysis.preSalaryBalance || 0),
     overallScore: analysis.score,
     verdict: analysis.verdict,
-    salaryInflowSharePct: Math.round(analysis.otherCredits?.salaryPct || 0),
-    otherInflowSharePct: Math.round(analysis.otherCredits?.pctOfTotalCredit || 0),
-    passThroughRatioPct: analysis.passThroughPct,
   };
 
-  const systemInstruction = `You are a Senior Credit Underwriter at an Indian Loan Sourcing Agency (DSA).
-Analyze the provided sanitized bank statement underwriting metrics and generate:
-1. "executiveSummary": Exactly 3 to 4 concise bullet points summarizing borrower's income profile, employment stability, obligation level, and overall creditworthiness.
-2. "riskHighlights": 2 to 3 bullet points highlighting positive credit signals or critical underwriting risks (e.g. high FOIR, bounces, instant loan app usage, pass-through ratio).
-3. "recommendation": A 1-2 sentence loan sourcing recommendation (e.g., suitable loan product, suggested loan ceiling, or cautionary stipulations).
+  const systemInstruction = `Sirf diye gaye numbers ka 4-5 bullet summary do. Koi nayi inference ya anumaan mat banao. Loan approve/reject ya credit limit ka faisla mat do. Har bullet diye gaye numbers pe based ho.
 
-Respond ONLY with a valid JSON object matching this exact schema:
+Respond ONLY with a valid JSON object matching this schema:
 {
-  "executiveSummary": ["string", "string", "string"],
-  "riskHighlights": ["string", "string"],
-  "recommendation": "string"
+  "bullets": [
+    "string",
+    "string",
+    "string",
+    "string"
+  ]
 }`;
 
   try {
@@ -86,8 +79,8 @@ Respond ONLY with a valid JSON object matching this exact schema:
           role: "user",
           parts: [
             {
-              text: `${systemInstruction}\n\nUnderwriting Context:\n${JSON.stringify(
-                sanitizedContext,
+              text: `${systemInstruction}\n\nComputed Numbers:\n${JSON.stringify(
+                sanitizedNumbers,
                 null,
                 2
               )}`,
@@ -151,19 +144,16 @@ Respond ONLY with a valid JSON object matching this exact schema:
     }
 
     const parsed = JSON.parse(rawText);
+    const bullets: string[] = Array.isArray(parsed.bullets)
+      ? parsed.bullets
+      : Array.isArray(parsed.executiveSummary)
+      ? parsed.executiveSummary
+      : [];
 
     return {
       enabled: true,
-      executiveSummary: Array.isArray(parsed.executiveSummary)
-        ? parsed.executiveSummary
-        : [],
-      riskHighlights: Array.isArray(parsed.riskHighlights)
-        ? parsed.riskHighlights
-        : [],
-      recommendation:
-        typeof parsed.recommendation === "string"
-          ? parsed.recommendation
-          : undefined,
+      bullets,
+      executiveSummary: bullets,
     };
   } catch (err: unknown) {
     const isAbort =

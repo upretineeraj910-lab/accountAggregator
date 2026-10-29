@@ -3,6 +3,7 @@
 // Pure functions, deterministic, unit-testable.
 
 import type { Txn } from "./parse.ts";
+import { extractHolderName } from "./holder.ts";
 
 export interface AccountInfo {
   holderName?: string;
@@ -85,6 +86,10 @@ export function extractAccountInfo(
     typeof userHolderName === "string" && userHolderName.trim().length > 0
       ? userHolderName.trim()
       : undefined;
+
+  if (!holderName) {
+    holderName = extractHolderName(lines);
+  }
 
   if (!holderName) {
     for (const line of headerLines) {

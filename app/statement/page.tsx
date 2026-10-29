@@ -7,7 +7,14 @@
 import React, { useState, useRef, useMemo } from "react";
 import styles from "./page.module.css";
 import { checkNewLoan, LOAN_CONFIG } from "@/lib/loanCheck";
-import { recomputeWithSalary } from "@/lib/analyze";
+import {
+  recomputeWithSalary,
+  type Reason,
+  type MonthlyRecord,
+  type MarketActivity,
+  type WalletRotation,
+  type AnalysisResult,
+} from "@/lib/analyze";
 import { type SalaryResult, getPrimaryEmployerName } from "@/lib/salary";
 import type { CreditCategory, OtherCreditsSummary } from "@/lib/otherCredits";
 import type { AccountInfo } from "@/lib/accountInfo";
@@ -18,78 +25,7 @@ import type { AiSummary } from "@/lib/ai";
 // const { user, isAuthenticated } = useAuth();
 // if (!isAuthenticated || user.role !== "dsa_agent") return <AccessDenied />;
 
-interface Reason {
-  text: string;
-  type: "positive" | "negative";
-}
-
-interface MonthlyRecord {
-  month: string;
-  monthKey: string;
-  credit: number;
-  debit: number;
-  closingBalance: number;
-}
-
-interface MarketActivity {
-  invested: number;
-  withdrawn: number;
-  net: number;
-  transfers: number;
-  sip: number;
-  isActive: boolean;
-  heavy: boolean;
-  summary: string;
-}
-
-interface WalletRotation {
-  walletCredits: number;
-  walletTransfers: number;
-  walletPct: number;
-  ccDebits: number;
-  isSuspected: boolean;
-  adjustedMonthlyCredit: number;
-  adjustedFoir: number;
-  summary: string;
-}
-
-interface AnalysisResult {
-  months: number;
-  avgMonthlyCredit: number;
-  avgMonthlyCreditExSelf: number;
-  avgSalary: number;
-  abb: number;
-  monthEndAvgBalance: number;
-  monthlyEmi: number;
-  foir: number;
-  bounces: number;
-  betting: number;
-  cashPct: number;
-  score: number;
-  verdict: "Strong" | "Average" | "Weak";
-  reasons: Reason[];
-  monthlyTable: MonthlyRecord[];
-  market: MarketActivity;
-  walletRotation: WalletRotation;
-  passThroughPct: number;
-  salaryRegularity: number;
-  oneOffCredits: { count: number; total: number };
-  selfTransferCredits: { count: number; total: number };
-  wallet: {
-    walletIn: number;
-    walletOut: number;
-    walletPctOfCredit: number;
-    walletPctOfDebit: number;
-  };
-  lendingApps: { count: number; total: number };
-  creditCardPayments: number;
-  insurancePayments: number;
-  emiCapacity: number | null;
-  salary: SalaryResult;
-  otherCredits: OtherCreditsSummary;
-  accountInfo: AccountInfo;
-  ai?: AiSummary;
-}
+// Redundant interfaces removed (imported from lib/analyze)
 
 interface ApiResponse {
   count: number;
@@ -262,6 +198,9 @@ export default function StatementPage() {
       setNeedPassword(false);
       setRawAnalysis(data.result);
       setTxnCount(data.count);
+      if (!holderName.trim() && data.result.accountInfo?.holderName) {
+        setHolderName(data.result.accountInfo.holderName);
+      }
 
       // Initialize selected credit keys with all detected salary credits
       const keys = new Set(
@@ -555,7 +494,7 @@ export default function StatementPage() {
             <div className={styles.aiHeaderRow}>
               <div className={styles.aiTitleWrap}>
                 <h2 className={styles.aiTitle}>
-                  🤖 AI Credit Underwriter Insights
+                  🤖 AI summary (indicative)
                 </h2>
               </div>
               {analysisData.ai?.enabled ? (
@@ -564,7 +503,7 @@ export default function StatementPage() {
                 </span>
               ) : (
                 <span className={styles.aiBadgeInactive}>
-                  AI Co-Pilot Available
+                  AI summary (indicative)
                 </span>
               )}
             </div>
@@ -1060,7 +999,11 @@ export default function StatementPage() {
 
               {/* 4. Monthly EMI */}
               <div className={styles.metricCard}>
-                <span className={styles.metricLabel}>Monthly EMI / NACH</span>
+                <span className={styles.metricLabel}>
+                  {analysisData.usedFullMonths
+                    ? "EMI (poore mahino ka avg)"
+                    : "Monthly EMI / NACH"}
+                </span>
                 <span className={styles.metricValue}>
                   {formatInr(analysisData.monthlyEmi)}
                 </span>
@@ -1408,6 +1351,75 @@ export default function StatementPage() {
           </section>
 
           {/* Credit Card / Wallet Rotation Detection Card */}
+          {/* Round-trip transactions (suspected) section */}
+          {analysisData.roundTrip && analysisData.roundTrip.count > 0 && (
+            <section className={styles.rotationCard}>
+              <div className={styles.marketHeader}>
+                <h2 className={styles.gridTitle} style={{ margin: 0 }}>
+                  Round-trip transactions (suspected)
+                </h2>
+                <span
+                  className={
+                    analysisData.roundTrip.suspected
+                      ? styles.rotationTagRed
+                      : styles.rotationTagNormal
+                  }
+                >
+                  {analysisData.roundTrip.suspected
+                    ? "⚠️ Rotation Suspected"
+                    : "ℹ️ Rapid In-Out Detected"}
+                </span>
+              </div>
+
+              <div
+                className={`${styles.marketSummaryBox} ${
+                  analysisData.roundTrip.suspected
+                    ? styles.marketSummaryDanger
+                    : styles.marketSummaryNormal
+                }`}
+              >
+                ℹ️ {analysisData.roundTrip.count} pair(s) detected with equal amount (₹
+                {formatInr(analysisData.roundTrip.volume)}) credited and debited within 0-1 day (
+                {analysisData.roundTrip.pctOfCredits}% of total credits).
+              </div>
+
+              <div className={styles.tableResponsive}>
+                <table className={styles.table}>
+                  <thead>
+                    <tr>
+                      <th>Amount</th>
+                      <th>Debit Date</th>
+                      <th>Debit Narration</th>
+                      <th>Credit Date</th>
+                      <th>Credit Narration</th>
+                      <th>Gap</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {analysisData.roundTrip.pairs.slice(0, 10).map((p, idx) => (
+                      <tr key={idx}>
+                        <td style={{ fontWeight: 600 }}>{formatInr(p.amount)}</td>
+                        <td>{formatDate(p.debitDate)}</td>
+                        <td className={styles.narrationCell} title={p.debitNarration}>
+                          {p.debitNarration.length > 30
+                            ? p.debitNarration.slice(0, 30) + "..."
+                            : p.debitNarration}
+                        </td>
+                        <td>{formatDate(p.creditDate)}</td>
+                        <td className={styles.narrationCell} title={p.creditNarration}>
+                          {p.creditNarration.length > 30
+                            ? p.creditNarration.slice(0, 30) + "..."
+                            : p.creditNarration}
+                        </td>
+                        <td>{p.diffDays === 0 ? "Same Day" : "Next Day"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
+
           <section className={styles.rotationCard}>
             <div className={styles.marketHeader}>
               <h2 className={styles.gridTitle} style={{ margin: 0 }}>

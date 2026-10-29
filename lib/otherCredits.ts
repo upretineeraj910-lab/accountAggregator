@@ -83,19 +83,27 @@ export function isSelfTransfer(
       return true;
     }
 
-    // Token prefix match: first token of at least 5 characters (e.g. "JOYDEEP" -> prefix "JOYDE")
+    // Token match: title stripped, first token (or 5-char prefix, e.g. "JOYDEEP" -> "JOYDE")
     const nameWithoutTitles = cleanHolder
       .replace(/\b(?:MR|MS|MRS|DR|SH|SMT)\b\.?/gi, " ")
       .replace(/[^A-Z\s]/g, " ")
       .trim();
-    const tokens = nameWithoutTitles.split(/\s+/).filter((w) => w.length >= 5);
+    const tokens = nameWithoutTitles.split(/\s+/).filter((w) => w.length >= 3);
 
     if (tokens.length > 0) {
       const firstToken = tokens[0];
-      const prefix5 = firstToken.slice(0, 5);
+      const prefix5 = firstToken.length >= 5 ? firstToken.slice(0, 5) : firstToken;
 
       if (narUpper.includes(firstToken) || narUpper.includes(prefix5)) {
         return true;
+      }
+
+      // Check initials / short representation: e.g. "ABC DEF" -> "ABC D"
+      if (tokens.length >= 2) {
+        const firstPlusInitial = `${firstToken} ${tokens[1][0]}`;
+        if (narUpper.includes(firstPlusInitial)) {
+          return true;
+        }
       }
     }
 

@@ -5,6 +5,7 @@
 
 import type { Txn } from "./parse.ts";
 import { SALARY_KW_REGEX, CORP_KEYWORDS } from "./keywords.ts";
+import { isSelfTransfer } from "./otherCredits.ts";
 
 export type SalaryCredit = {
   date: Date;
@@ -77,15 +78,27 @@ export function extractSenderKey(
     }
   }
 
-  // Strip NEFT_IN: tokens and UTR-style codes before segmenting
+  // Strip NEFT_IN: tokens, standard IFSC codes, alphanumeric UTRs, and long numbers before segmenting
   const stripped = upper
     .replace(/\bNEFT_IN:[A-Z0-9_/-]+/gi, " ")
     .replace(/\bNEFT_IN\b/gi, " ")
-    .replace(/\b[A-Z]{4}[0-9]{7,}\b/gi, " ");
+    .replace(/\b[A-Z]{4}0[A-Z0-9]{6}\b/gi, " ")
+    .replace(/\b(?=[A-Z0-9]*\d)[A-Z0-9]{8,}\b/gi, " ")
+    .replace(/\b\d{6,}\b/g, " ");
 
-  const rawSegments = stripped.split(/[/\\:;|,]+/);
+  const rawSegments = stripped.split(/[/\\:;|,-]+/);
   let bestCandidate: string | null = null;
   let bestScore = -1;
+
+  // Extract individual tokens from holderName (min 3 chars)
+  const holderTokens = cleanHolder
+    ? cleanHolder
+        .replace(/\b(?:MR|MS|MRS|DR|SH|SMT)\b\.?/gi, " ")
+        .replace(/[^A-Z\s]/g, " ")
+        .trim()
+        .split(/\s+/)
+        .filter((w) => w.length >= 3)
+    : [];
 
   for (const rawSeg of rawSegments) {
     const rawTrimmed = rawSeg.trim();
@@ -101,14 +114,46 @@ export function extractSenderKey(
     let seg = cleanSegmentText(rawTrimmed);
     if (seg.length < 3) continue;
 
+    // Discard pure salary/remark phrases from becoming the employer name
+    if (
+      /^(?:SALARY|SAL|PAYROLL|WAGES|REMUNERATION|MONTHLY\s*SAL(?:ARY)?)$/i.test(
+        seg
+      )
+    ) {
+      continue;
+    }
+
     // Skip segments that represent the account holder's name (beneficiary)
     if (cleanHolder && cleanHolder.length >= 3 && seg.includes(cleanHolder)) {
       continue;
     }
 
+    // Strip employee/holder tokens from segment if mixed with employer name
+    if (holderTokens.length > 0) {
+      for (const ht of holderTokens) {
+        seg = seg.replace(new RegExp(`\\b${ht}\\b`, "gi"), " ");
+      }
+      // Also remove partial/fuzzy tokens of holder (e.g. truncated middle name like 'NDAN' from 'NANDAN')
+      const words = seg.split(/\s+/);
+      const filteredWords = words.filter((w) => {
+        if (
+          w.length >= 4 &&
+          holderTokens.some((ht) => ht.includes(w) || w.includes(ht))
+        ) {
+          return false;
+        }
+        return true;
+      });
+      seg = filteredWords.join(" ");
+      // Clean up orphan 1-2 character abbreviations
+      seg = seg.replace(/\b[A-Za-z]{1,2}\b/g, " ").replace(/\s+/g, " ").trim();
+    }
+
+    if (seg.length < 3) continue;
+
     let score = seg.length;
     if (CORP_KEYWORDS.test(seg)) score += 100;
-    if (/TREASURY|PAYROLL|SALARY|WAGES/i.test(seg)) score += 80;
+    if (/TREASURY/i.test(seg)) score += 80;
 
     if (score > bestScore) {
       bestScore = score;
@@ -291,7 +336,10 @@ export function detectSalary(txns: Txn[], holderName?: string): SalaryResult {
       }
 
       const distinctMonths = monthlyMaxMap.size;
-      if (distinctMonths < 2) continue;
+      const isCorporate = CORP_KEYWORDS.test(sKey) || /TREASURY/i.test(sKey);
+      const minMonthsNeeded =
+        totalMonthKeys.size === 1 && isCorporate ? 1 : 2;
+      if (distinctMonths < minMonthsNeeded) continue;
 
       const monthlyAmounts = Array.from(monthlyMaxMap.values());
       const median = calculateMedian(monthlyAmounts);
@@ -304,7 +352,6 @@ export function detectSalary(txns: Txn[], holderName?: string): SalaryResult {
         }
       }
 
-      const isCorporate = CORP_KEYWORDS.test(sKey) || /TREASURY/i.test(sKey);
       const consistencyRatio = consistentCount / monthlyAmounts.length;
 
       // Senders must have either a corporate entity name or consistent amounts
@@ -327,16 +374,93 @@ export function detectSalary(txns: Txn[], holderName?: string): SalaryResult {
     if (candidates.length > 0) {
       candidates.sort((a, b) => b.score - a.score);
       const winner = candidates[0];
-      chosenCredits = winner.credits.map((c) => ({
-        date: c.date,
-        amount: c.credit,
-        narration: c.narration,
-        reason: "recurring",
-      }));
-      chosenMethod = "recurring";
+
+      // If Step A found explicit high-value corporate salary credits (>= 10,000)
+      // and the recurring winner is significantly smaller (< 50% of Step A amount),
+      // prioritize the explicit corporate salary credit over minor recurring transfers.
+      const stepAMax =
+        stepACredits.length > 0
+          ? Math.max(...stepACredits.map((c) => c.amount))
+          : 0;
+
+      if (
+        stepACredits.length > 0 &&
+        stepAMax >= 10000 &&
+        winner.median < 0.5 * stepAMax
+      ) {
+        chosenCredits = stepACredits;
+        chosenMethod = "keyword";
+      } else {
+        chosenCredits = winner.credits.map((c) => ({
+          date: c.date,
+          amount: c.credit,
+          narration: c.narration,
+          reason: "recurring",
+        }));
+        chosenMethod = "recurring";
+      }
     } else if (stepACredits.length > 0) {
       chosenCredits = stepACredits;
       chosenMethod = "keyword";
+    }
+  }
+
+  // ----------------------------------------------------
+  // Step B.2: Anchored Cross-Month Salary Recovery
+  // If at least one genuine salary credit (>= 10,000) was identified (via keyword or recurring),
+  // recover consistent electronic transfer credits in months where salary narration was abbreviated
+  // or sent via a different remitting gateway/bank (e.g. IMPS Northeast Small Finance vs NEFT Pharmanovia).
+  // ----------------------------------------------------
+  if (chosenCredits.length > 0) {
+    const anchorAmounts = chosenCredits.map((c) => c.amount);
+    const anchorMedian = calculateMedian(anchorAmounts);
+
+    if (anchorMedian >= 10000) {
+      const existingSalaryMonthKeys = new Set(
+        chosenCredits.map(
+          (c) => `${c.date.getFullYear()}-${c.date.getMonth()}`
+        )
+      );
+
+      for (const t of txns) {
+        if (t.credit < 10000) continue;
+        const mKey = `${t.date.getFullYear()}-${t.date.getMonth()}`;
+        if (existingSalaryMonthKeys.has(mKey)) continue;
+
+        // Must be consistent with the anchor salary (within +/- 35%)
+        const diffRatio = Math.abs(t.credit - anchorMedian) / anchorMedian;
+        if (diffRatio > 0.35) continue;
+
+        // Exclude self-transfers
+        if (isSelfTransfer(t.narration, holderName)) continue;
+
+        // Exclude cash deposits, refunds, interest, reversals, bounces
+        if (
+          /\b(?:UPI\/P2A|P2A|P2P|UPI\/P2P|CDM|CASH\s*DEP|REFUND|REVERSAL|BOUNCE|INTEREST|INT\.PD)\b/i.test(
+            t.narration
+          ) &&
+          !SALARY_KW_REGEX.test(t.narration) &&
+          !CORP_KEYWORDS.test(t.narration)
+        ) {
+          continue;
+        }
+
+        // Must arrive via electronic transfer protocol or corporate/salary keywords
+        const isElectronicPayroll =
+          /(?:NEFT|RTGS|IMPS|NEFT_IN)/i.test(t.narration) ||
+          CORP_KEYWORDS.test(t.narration) ||
+          SALARY_KW_REGEX.test(t.narration);
+
+        if (isElectronicPayroll) {
+          chosenCredits.push({
+            date: t.date,
+            amount: t.credit,
+            narration: t.narration,
+            reason: "recurring",
+          });
+          existingSalaryMonthKeys.add(mKey);
+        }
+      }
     }
   }
 

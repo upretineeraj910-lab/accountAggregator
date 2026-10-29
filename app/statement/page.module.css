@@ -1255,6 +1255,48 @@
   margin: 0;
 }
 
+.holderNameWrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.profileNameInput {
+  font-size: 18px;
+  font-weight: 700;
+  color: #0f172a;
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 4px 10px;
+  outline: none;
+  width: 100%;
+  max-width: 320px;
+  transition: all 0.15s ease;
+}
+
+.profileNameInput:focus {
+  border-color: #3b82f6;
+  background: #ffffff;
+}
+
+.applyNameBtn {
+  font-size: 12px;
+  font-weight: 600;
+  color: #1e40af;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.applyNameBtn:hover {
+  background: #dbeafe;
+}
+
 .profileBankPill {
   font-size: 13px;
   font-weight: 700;

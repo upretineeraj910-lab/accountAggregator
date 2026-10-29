@@ -3,7 +3,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { pdfToRows, rowsToLines } from "@/lib/pdfText";
-import { parseStatementWithDebug } from "@/lib/parse";
+import { parseStatementWithDebug, type Txn } from "@/lib/parse";
 import { analyze, marketActivity } from "@/lib/analyze";
 import { generateAiAssessment, type AiSummary } from "@/lib/ai";
 
@@ -58,7 +58,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         : undefined;
 
     const holderNameRaw = formData.get("holderName");
-    const holderName =
+    let holderName =
       typeof holderNameRaw === "string" && holderNameRaw.trim().length > 0
         ? holderNameRaw.trim()
         : undefined;
@@ -67,17 +67,122 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const arrayBuffer = await file.arrayBuffer();
     const buf = Buffer.from(arrayBuffer);
 
-    // Extract rows and lines, and parse transactions using format auto-detection
-    const rows = await pdfToRows(buf, password);
-    const lines = rowsToLines(rows);
-    const {
-      txns,
-      profile,
-      anchorsCount,
-      droppedFragmentsCount,
-      balanceMismatchCount,
-      narrationFirst,
-    } = parseStatementWithDebug(rows);
+    let txns: Txn[] = [];
+    let profile: "pnb" | "axis" | "generic" = "generic";
+    let anchorsCount = 0;
+    let droppedFragmentsCount = 0;
+    let balanceMismatchCount = 0;
+    let narrationFirst = false;
+    let lines: string[] = [];
+    let parserUsed: "python" | "ts" = "ts";
+
+    const parserUrl = process.env.PARSER_URL?.trim();
+    const parserKey = process.env.PARSER_KEY?.trim();
+
+    // 1. If PARSER_URL and PARSER_KEY are provided, attempt parsing via the Python microservice
+    if (parserUrl && parserKey) {
+      try {
+        const pythonFormData = new FormData();
+        const blob = new Blob([arrayBuffer], { type: "application/pdf" });
+        pythonFormData.append("file", blob, file.name || "statement.pdf");
+        if (password) {
+          pythonFormData.append("password", password);
+        }
+
+        const pythonRes = await fetch(`${parserUrl.replace(/\/+$/, "")}/parse`, {
+          method: "POST",
+          headers: {
+            "X-API-Key": parserKey,
+          },
+          body: pythonFormData,
+        });
+
+        if (pythonRes.status === 401) {
+          const authData = (await pythonRes.json().catch(() => ({}))) as {
+            needPassword?: boolean;
+          };
+          if (authData.needPassword) {
+            return NextResponse.json(
+              {
+                error: "PDF password required or incorrect.",
+                needPassword: true,
+              },
+              { status: 401 }
+            );
+          }
+        }
+
+        if (pythonRes.ok) {
+          const data = (await pythonRes.json()) as {
+            profile: "pnb" | "axis" | "icici" | "generic";
+            txns: Array<{
+              date: string;
+              narration: string;
+              debit: number;
+              credit: number;
+              balance: number;
+            }>;
+            holder?: {
+              name?: string;
+              branch?: string;
+              accountNo?: string;
+              ifsc?: string;
+            };
+            quality?: {
+              ok: boolean;
+              mismatches: number;
+              total: number;
+              firstRowUncertain: boolean;
+            };
+          };
+
+          if (Array.isArray(data.txns) && data.txns.length > 0) {
+            txns = data.txns.map((t) => ({
+              date: new Date(t.date),
+              narration: t.narration,
+              debit: t.debit,
+              credit: t.credit,
+              balance: t.balance,
+            }));
+            profile =
+              data.profile === "pnb"
+                ? "pnb"
+                : data.profile === "axis"
+                ? "axis"
+                : "generic";
+            anchorsCount = txns.length;
+            balanceMismatchCount = data.quality?.mismatches || 0;
+            parserUsed = "python";
+
+            if (!holderName && data.holder?.name) {
+              holderName = data.holder.name;
+            }
+          }
+        } else {
+          console.warn(
+            `[Python Parser]: received status ${pythonRes.status}, falling back to TS parser`
+          );
+        }
+      } catch (pythonErr) {
+        console.warn(
+          "[Python Parser Error]: falling back to TS parser",
+          pythonErr
+        );
+      }
+    }
+
+    // 2. Fallback to TypeScript parser if Python service was unavailable or not configured
+    if (parserUsed === "ts") {
+      const rows = await pdfToRows(buf, password);
+      lines = rowsToLines(rows);
+      const parsed = parseStatementWithDebug(rows);
+      txns = parsed.txns;
+      profile = parsed.profile;
+      anchorsCount = parsed.anchorsCount;
+      droppedFragmentsCount = parsed.droppedFragmentsCount;
+      balanceMismatchCount = parsed.balanceMismatchCount;
+      narrationFirst = parsed.narrationFirst;
+    }
 
     // If fewer than 5 transactions, return 422
     if (txns.length < 5) {
@@ -106,8 +211,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // Result with analysis merged with market, walletRotation, monthlyTable, and AI underwriting
     const responsePayload: {
       count: number;
+      parser: "python" | "ts";
       result: typeof analysis & { market: typeof market; ai: AiSummary };
       debug?: {
+        parser: "python" | "ts";
         profile: "pnb" | "axis" | "generic";
         anchorsCount: number;
         droppedFragmentsCount: number;
@@ -124,6 +231,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       };
     } = {
       count: txns.length,
+      parser: parserUsed,
       result: {
         ...analysis,
         market,
@@ -132,13 +240,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     };
 
     // Small debug option: ?debug=1 AND NODE_ENV !== "production"
-    // Returns profile, anchorsCount, droppedFragmentsCount, balanceMismatchCount, first 40 extracted lines, and first 10 sample txns
     const { searchParams } = new URL(req.url);
     if (
       searchParams.get("debug") === "1" &&
       process.env.NODE_ENV !== "production"
     ) {
       responsePayload.debug = {
+        parser: parserUsed,
         profile,
         anchorsCount,
         droppedFragmentsCount,

@@ -375,9 +375,27 @@ export default function StatementPage() {
               <div className={styles.profileHeaderRow}>
                 <div className={styles.profileTitleWrap}>
                   <span className={styles.profileBadge}>Client &amp; Account Profile</span>
-                  <h2 className={styles.profileTitle}>
-                    {analysisData.accountInfo.holderName || holderName || "Account Holder Not Specified"}
-                  </h2>
+                  <div className={styles.holderNameWrap}>
+                    <input
+                      type="text"
+                      className={styles.profileNameInput}
+                      value={holderName}
+                      placeholder="—"
+                      onChange={(e) => setHolderName(e.target.value)}
+                      title="Account Holder Name (Editable for self-transfer analysis)"
+                    />
+                    {selectedFile && (
+                      <button
+                        type="button"
+                        className={styles.applyNameBtn}
+                        onClick={(e) => handleSubmit(e as unknown as React.FormEvent)}
+                        title="Re-run analysis with updated account holder name"
+                        disabled={loading}
+                      >
+                        {loading ? "Updating..." : "Update Name"}
+                      </button>
+                    )}
+                  </div>
                 </div>
                 {analysisData.accountInfo.bankName && (
                   <div className={styles.profileBankPill}>
@@ -391,7 +409,7 @@ export default function StatementPage() {
                 <div className={styles.profileItem}>
                   <span className={styles.profileLabel}>Account Number</span>
                   <span className={styles.profileValue}>
-                    {analysisData.accountInfo.accountNumber || "Not Available"}
+                    {analysisData.accountInfo.accountNumber || "—"}
                   </span>
                 </div>
 
@@ -399,7 +417,7 @@ export default function StatementPage() {
                 <div className={styles.profileItem}>
                   <span className={styles.profileLabel}>Account Type</span>
                   <span className={styles.profileValue}>
-                    {analysisData.accountInfo.accountType || "Savings Account"}
+                    {analysisData.accountInfo.accountType || "—"}
                   </span>
                 </div>
 
@@ -407,7 +425,7 @@ export default function StatementPage() {
                 <div className={styles.profileItem}>
                   <span className={styles.profileLabel}>IFSC Code</span>
                   <span className={styles.profileValue}>
-                    {analysisData.accountInfo.ifsc || "Not Specified in Statement"}
+                    {analysisData.accountInfo.ifsc || "—"}
                   </span>
                 </div>
 
@@ -418,7 +436,7 @@ export default function StatementPage() {
                     className={styles.profileValue}
                     title={analysisData.accountInfo.branch}
                   >
-                    {analysisData.accountInfo.branch || "Base Branch"}
+                    {analysisData.accountInfo.branch || "—"}
                   </span>
                 </div>
 
@@ -439,7 +457,7 @@ export default function StatementPage() {
                   >
                     {analysisData.accountInfo.closingBalance !== undefined
                       ? formatInrPrecise(analysisData.accountInfo.closingBalance)
-                      : formatInr(analysisData.monthEndAvgBalance)}
+                      : "—"}
                   </span>
                 </div>
               </div>

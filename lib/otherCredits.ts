@@ -14,6 +14,8 @@ import {
   INTEREST_RE,
   CASH_DEPOSIT_RE,
   UPI_RE,
+  SALARY_KW_REGEX,
+  CORP_KEYWORDS,
 } from "./keywords.ts";
 
 export type CreditCategory =
@@ -74,7 +76,15 @@ export function isSelfTransfer(
     return true;
   }
 
-  // 2. Holder name matching
+  // 2. Explicit corporate salary credits are never self-transfers even if employee/holder name is printed in narration
+  if (SALARY_KW_REGEX.test(narration)) {
+    return false;
+  }
+  if (/(?:NEFT|RTGS|IMPS)/i.test(narration) && CORP_KEYWORDS.test(narration)) {
+    return false;
+  }
+
+  // 3. Holder name matching
   if (holderName && holderName.trim().length >= 3) {
     const cleanHolder = holderName.trim().toUpperCase();
 

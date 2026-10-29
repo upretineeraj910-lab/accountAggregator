@@ -10,6 +10,7 @@ import {
   type OtherCreditsSummary,
 } from "./otherCredits.ts";
 import { extractAccountInfo, type AccountInfo } from "./accountInfo.ts";
+import { extractHolderName } from "./holder.ts";
 import type { AiSummary } from "./ai.ts";
 import {
   kw,
@@ -377,6 +378,8 @@ export function analyze(
 ): AnalysisResult {
   const holderName = typeof opts === "string" ? opts : opts?.holderName;
   const rawLines = typeof opts === "object" ? opts?.rawLines : undefined;
+  const effectiveHolderName =
+    holderName || (rawLines ? extractHolderName(rawLines) : undefined);
 
   // 1. Group transactions by month
   const monthMap = new Map<
@@ -470,7 +473,7 @@ export function analyze(
     }
 
     // Self-transfers on debits & credits
-    if (isSelfTransfer(t.narration, holderName)) {
+    if (isSelfTransfer(t.narration, effectiveHolderName)) {
       if (t.credit > 0) selfIn += t.credit;
       if (t.debit > 0) selfOut += t.debit;
     }
@@ -599,7 +602,7 @@ export function analyze(
   }
 
   // Robust multi-step salary detection
-  const salary = detectSalary(txns, holderName);
+  const salary = detectSalary(txns, effectiveHolderName);
   const avgSalary = salary.avgSalary;
   const salaryMonths = salary.months;
 
@@ -675,7 +678,7 @@ export function analyze(
   const otherCredits = summarizeOtherCredits(
     txns,
     salary.credits,
-    holderName,
+    effectiveHolderName,
     avgSalary
   );
 
@@ -1090,7 +1093,7 @@ export function analyze(
     emiCapacity,
     salary,
     otherCredits,
-    accountInfo: extractAccountInfo(rawLines || [], txns, holderName),
+    accountInfo: extractAccountInfo(rawLines || [], txns, effectiveHolderName),
   };
 }
 

@@ -6,7 +6,7 @@ import { parseTxns, parseStatement, parseStatementWithDebug, type Txn } from "..
 import type { Row } from "../pdfText.ts";
 import { analyze } from "../analyze.ts";
 import { calcEmi, maxLoanForEmi, checkNewLoan } from "../loanCheck.ts";
-import { detectSalary, type SalaryCredit } from "../salary.ts";
+import { detectSalary, extractSenderKey, type SalaryCredit } from "../salary.ts";
 import { summarizeOtherCredits, isSelfTransfer } from "../otherCredits.ts";
 import {
   isObligationDebit,
@@ -18,6 +18,7 @@ import {
 import { extractAccountInfo } from "../accountInfo.ts";
 import { generateAiAssessment } from "../ai.ts";
 import { extractHolderName } from "../holder.ts";
+import { extractProfile } from "../profile.ts";
 import { detectRoundTrips } from "../roundTrip.ts";
 
 // ==========================================
@@ -1184,6 +1185,168 @@ try {
 // --- Rule 6: Purane Axis aur PNB tests pass hote rahein ---
 // (Already tested by earlier assertions on Axis Bank fixture and fakePnbRows)
 
+// --- Rule 8: HDFC Corporate Salary Narration & Holder Name Non-Self-Transfer ---
+const hdfcSalaryNarration =
+  "NEFT CR-CHAS0INBX01-PHARMANOVIA INDIA PR NDAN MHATRE-CHAS00000151288-SALARY 0926";
+const hdfcHolder = "MR. PRAVIN NANDAN MHATRE";
+
+// 1. Sender Key extraction cleanly isolates corporate employer
+const extractedSender = extractSenderKey(hdfcSalaryNarration, hdfcHolder);
+assert.strictEqual(
+  extractedSender,
+  "PHARMANOVIA INDIA",
+  `Expected sender key 'PHARMANOVIA INDIA', got '${extractedSender}'`
+);
+
+// 2. Self-transfer check MUST return false even though employee name is in narration
+const selfTransferCheck = isSelfTransfer(hdfcSalaryNarration, hdfcHolder);
+assert.strictEqual(
+  selfTransferCheck,
+  false,
+  "Corporate salary credit must NOT be flagged as self-transfer"
+);
+
+// 3. Salary detection accepts this as genuine salary
+const hdfcTxns: Txn[] = [
+  {
+    date: new Date(2026, 8, 25),
+    narration: hdfcSalaryNarration,
+    debit: 0,
+    credit: 150582,
+    balance: 157055.77,
+  },
+  {
+    date: new Date(2026, 7, 10),
+    narration: "NEFT CR-0001-ALPHA SOLUTIONS-PAYMENT",
+    debit: 0,
+    credit: 25000,
+    balance: 20000,
+  },
+  {
+    date: new Date(2026, 8, 10),
+    narration: "NEFT CR-0002-ALPHA SOLUTIONS-PAYMENT",
+    debit: 0,
+    credit: 25000,
+    balance: 35000,
+  },
+];
+
+const salaryDetectionResult = detectSalary(hdfcTxns, hdfcHolder);
+assert.strictEqual(
+  salaryDetectionResult.avgSalary,
+  150582,
+  `Expected avgSalary to be 150582, got ${salaryDetectionResult.avgSalary}`
+);
+assert.strictEqual(
+  salaryDetectionResult.credits.length,
+  1,
+  "Expected 1 deduplicated salary credit"
+);
+
+// 4. In full analyze, salary is detected and otherCredits does not classify it as loan-like or self-transfer
+const hdfcAnalysis = analyze(hdfcTxns, { holderName: hdfcHolder });
+assert.strictEqual(
+  hdfcAnalysis.avgSalary,
+  150582,
+  "Full analyze must recognize 150582 as avgSalary"
+);
+assert.strictEqual(
+  hdfcAnalysis.selfIn,
+  0,
+  "selfIn must be 0 for corporate salary"
+);
+assert.strictEqual(
+  hdfcAnalysis.otherCredits.byCategory.SELF_TRANSFER.count,
+  0,
+  "SELF_TRANSFER count must be 0"
+);
+assert.strictEqual(
+  hdfcAnalysis.otherCredits.byCategory.LOAN_LIKE.count,
+  0,
+  "Salary must not be classified as LOAN_LIKE"
+);
+
+// 5. April IMPS transfer from NORTHEASTSMALLFINAN (141,800) recognized as salary
+const aprilSalaryNarration =
+  "IMPS-609397388735-NORTHEASTSMALLFINAN 0000609397388735 03/04/26 141,800.00 143,922.80 CE";
+const multiMonthTxns: Txn[] = [
+  {
+    date: new Date(2026, 3, 3),
+    narration: aprilSalaryNarration,
+    debit: 0,
+    credit: 141800,
+    balance: 143922.8,
+  },
+  {
+    date: new Date(2026, 8, 25),
+    narration: hdfcSalaryNarration,
+    debit: 0,
+    credit: 150582,
+    balance: 157055.77,
+  },
+];
+
+const multiRes = detectSalary(multiMonthTxns, hdfcHolder);
+assert.strictEqual(multiRes.months, 2, "Expected 2 salary months (Apr + Sep)");
+assert.strictEqual(multiRes.credits[0].amount, 141800, "Expected Apr credit 141800");
+assert.strictEqual(multiRes.credits[1].amount, 150582, "Expected Sep credit 150582");
+assert.strictEqual(multiRes.avgSalary, 146191, "Expected avgSalary 146191");
+
+const singleAprilRes = detectSalary([multiMonthTxns[0]], hdfcHolder);
+assert.strictEqual(singleAprilRes.months, 1, "Expected 1 salary month for single-month April statement");
+assert.strictEqual(singleAprilRes.avgSalary, 141800, "Expected 141800 avgSalary");
+
+// --- Rule 9: Strict Profile Extraction (PNB, Axis, ICICI, and Unlabeled) ---
+const pnbHeaderLines = [
+  "PUNJAB NATIONAL BANK",
+  "Branch Details Name: MATIA",
+  "Customer Name: ABC DEF",
+  "Account No: 1234567890123456",
+  "IFSC: PUNB0123456",
+  "Date | Instrument ID | Amount(INR) | Type | Balance | Remarks",
+];
+const pnbProfile = extractProfile(pnbHeaderLines);
+assert.strictEqual(pnbProfile.name, "ABC DEF", "PNB profile name must be 'ABC DEF'");
+assert.strictEqual(pnbProfile.branch, "MATIA", "PNB branch must be 'MATIA' without 'Details' or 'Name'");
+assert.strictEqual(pnbProfile.accountNo, "1234567890123456", "PNB accountNo must be '1234567890123456'");
+assert.strictEqual(pnbProfile.ifsc, "PUNB0123456", "PNB ifsc must be 'PUNB0123456'");
+
+const unlabeledLines = [
+  "JUST SOME RANDOM TEXT",
+  "123456",
+  "HELLO WORLD",
+];
+const unlabeledProfile = extractProfile(unlabeledLines);
+assert.strictEqual(unlabeledProfile.name, undefined, "Unlabeled lines must yield undefined name");
+assert.strictEqual(unlabeledProfile.branch, undefined, "Unlabeled lines must yield undefined branch");
+assert.strictEqual(unlabeledProfile.accountNo, undefined, "Unlabeled lines must yield undefined accountNo");
+assert.strictEqual(unlabeledProfile.ifsc, undefined, "Unlabeled lines must yield undefined ifsc");
+
+const axisProfileLines = [
+  "AXIS BANK LTD",
+  "Statement of Axis Account No: 912010012345678",
+  "MR. PRAVEEN KUMAR",
+  "Joint Holder :-",
+  "IFSC Code: UTIB0000005",
+];
+const axisProfile = extractProfile(axisProfileLines);
+assert.strictEqual(axisProfile.name, "MR. PRAVEEN KUMAR", "Axis profile name must be extracted correctly");
+assert.strictEqual(axisProfile.accountNo, "912010012345678", "Axis account number must match");
+assert.strictEqual(axisProfile.ifsc, "UTIB0000005", "Axis IFSC must match");
+
+const iciciProfileLines = [
+  "ICICI BANK LIMITED",
+  "ROHIT SHARMA",
+  "Your Base Branch: ANDHERI EAST",
+  "Account Number: 000101001234",
+  "IFSC: ICIC0000001",
+];
+const iciciProfile = extractProfile(iciciProfileLines);
+assert.strictEqual(iciciProfile.name, "ROHIT SHARMA", "ICICI profile name must be extracted correctly");
+assert.strictEqual(iciciProfile.branch, "ANDHERI EAST", "ICICI branch must be 'ANDHERI EAST'");
+assert.strictEqual(iciciProfile.accountNo, "000101001234", "ICICI account number must match");
+assert.strictEqual(iciciProfile.ifsc, "ICIC0000001", "ICICI IFSC must match");
+
 console.log(
-  "All unit test assertions (Axis fixture + PNB ONE profile + 7 invariant rule tests + all scenarios) passed successfully!"
+  "All unit test assertions (Axis fixture + PNB ONE profile + 9 invariant rule tests + all scenarios) passed successfully!"
 );
